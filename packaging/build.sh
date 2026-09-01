@@ -8,6 +8,8 @@
 #   ./packaging/build.sh                 build, sign, notarise, staple, package
 #   ./packaging/build.sh --no-notarize   build and sign only (quick local check)
 #   ./packaging/build.sh --no-sign       build only (no certificate needed)
+#   ./packaging/build.sh --no-pandoc     leave out the bundled pandoc; the app
+#                                        then offers the author its installer
 #
 set -euo pipefail
 
@@ -22,6 +24,13 @@ COPYRIGHT="${COPYRIGHT:-}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 ARCH="${ARCH:-$(uname -m)}"
 
+# pandoc is what turns a Word document into a chapter. It is bundled so that the
+# author's Mac still needs nothing installed: without it the app falls back to
+# offering them pandoc's own installer, which works, but is a hurdle they should
+# not have to clear. It is a large statically linked binary, so it roughly
+# quadruples the finished app.
+PANDOC_VERSION="${PANDOC_VERSION:-}"        # empty means "the latest release"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/build"
 DIST="$ROOT/dist"
@@ -30,10 +39,12 @@ APP="$BUILD/$APP_NAME.app"
 
 DO_SIGN=1
 DO_NOTARIZE=1
+DO_PANDOC=1
 for arg in "$@"; do
   case "$arg" in
     --no-sign)     DO_SIGN=0; DO_NOTARIZE=0 ;;
     --no-notarize) DO_NOTARIZE=0 ;;
+    --no-pandoc)   DO_PANDOC=0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -166,6 +177,53 @@ REAL_PY=$(ls "$APP/Contents/Resources/python/bin/python${PYTHON_VERSION}" 2>/dev
 cp "$REAL_PY" "$APP/Contents/Resources/python/bin/$EXECUTABLE"
 chmod +x "$APP/Contents/Resources/python/bin/$EXECUTABLE"
 
+# --- pandoc ------------------------------------------------------------------
+# Fetched from pandoc's own release page, the same build the author would get if
+# they installed it themselves.
+
+if [ "$DO_PANDOC" -eq 1 ]; then
+  step "Fetching pandoc"
+  case "$ARCH" in
+    arm64)  PANDOC_ARCH="arm64" ;;
+    x86_64) PANDOC_ARCH="x86_64" ;;
+  esac
+
+  if [ -z "$PANDOC_VERSION" ]; then
+    PANDOC_VERSION=$(curl -fsSL \
+      "https://api.github.com/repos/jgm/pandoc/releases/latest" \
+      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+  fi
+  [ -n "$PANDOC_VERSION" ] || die "Could not work out the latest pandoc release."
+
+  PANDOC_ASSET="https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-${PANDOC_ARCH}-macOS.zip"
+  PANDOC_ZIP="$CACHE/$(basename "$PANDOC_ASSET")"
+  if [ ! -f "$PANDOC_ZIP" ]; then
+    note "downloading $(basename "$PANDOC_ASSET")"
+    curl -fsSL -o "$PANDOC_ZIP.part" "$PANDOC_ASSET" \
+      || die "pandoc $PANDOC_VERSION has no $PANDOC_ARCH build for macOS."
+    mv "$PANDOC_ZIP.part" "$PANDOC_ZIP"
+  else
+    note "using the copy already in build/cache"
+  fi
+
+  PANDOC_TMP="$BUILD/pandoc-unpack"
+  rm -rf "$PANDOC_TMP"; mkdir -p "$PANDOC_TMP"
+  ditto -x -k "$PANDOC_ZIP" "$PANDOC_TMP"
+  PANDOC_BIN=$(find "$PANDOC_TMP" -type f -name pandoc -perm +111 | head -1)
+  [ -n "$PANDOC_BIN" ] || die "No pandoc executable inside $(basename "$PANDOC_ZIP")."
+
+  # Only the one executable. pandoc-lua and pandoc-server are links to the same
+  # binary that this tool never calls, and the manual pages are 300 KB of text
+  # for a program the author will never know they are running.
+  mkdir -p "$APP/Contents/Resources/pandoc/bin"
+  cp "$PANDOC_BIN" "$APP/Contents/Resources/pandoc/bin/pandoc"
+  chmod +x "$APP/Contents/Resources/pandoc/bin/pandoc"
+  rm -rf "$PANDOC_TMP"
+  note "pandoc $PANDOC_VERSION ($(du -h "$APP/Contents/Resources/pandoc/bin/pandoc" | cut -f1))"
+else
+  note "skipping pandoc; the app will offer the author its installer instead"
+fi
+
 note "bundle size: $(du -sh "$APP" | cut -f1)"
 
 # --- a quick check that it actually runs -------------------------------------
@@ -174,6 +232,21 @@ step "Checking the bundled Python works"
 PYTHONHOME="$APP/Contents/Resources/python" \
   "$APP/Contents/Resources/python/bin/$EXECUTABLE" -s -B -c \
   'import ssl, json, urllib.request, http.server, hashlib; print("    interpreter and ssl are fine")'
+
+if [ "$DO_PANDOC" -eq 1 ]; then
+  step "Checking the bundled pandoc works"
+  "$APP/Contents/Resources/pandoc/bin/pandoc" --version | head -1 | sed 's/^/    /'
+  # The one conversion the app actually performs, end to end, so a broken or
+  # wrong-architecture binary is caught here rather than on the author's Mac.
+  printf '# Heading\n\nA paragraph.\n' > "$BUILD/.check.md"
+  "$APP/Contents/Resources/pandoc/bin/pandoc" "$BUILD/.check.md" -o "$BUILD/.check.docx"
+  "$APP/Contents/Resources/pandoc/bin/pandoc" "$BUILD/.check.docx" \
+    -f docx -t gfm --wrap=none -o "$BUILD/.check.out.md"
+  grep -q '^# Heading' "$BUILD/.check.out.md" \
+    || die "The bundled pandoc did not convert a Word document correctly."
+  note "a Word document converted correctly"
+  rm -f "$BUILD/.check.md" "$BUILD/.check.docx" "$BUILD/.check.out.md"
+fi
 
 # --- signing -----------------------------------------------------------------
 
@@ -201,6 +274,15 @@ if [ "$DO_SIGN" -eq 1 ]; then
            --entitlements "$ENTITLEMENTS" \
            --sign "$SIGN_IDENTITY" \
            "$APP/Contents/Resources/python/bin/$EXECUTABLE" >/dev/null
+
+  if [ "$DO_PANDOC" -eq 1 ]; then
+    # pandoc arrives signed by its own publisher, which means nothing once it is
+    # inside our bundle: everything in an app has to be signed by the identity
+    # that signs the app. It needs no entitlements - it reads a file and writes
+    # a file, and never loads a library of ours.
+    note "signing the bundled pandoc"
+    sign_one "$APP/Contents/Resources/pandoc/bin/pandoc"
+  fi
 
   note "signing the launcher and the bundle"
   codesign --force --timestamp --options runtime \

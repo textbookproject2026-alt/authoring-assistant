@@ -63,6 +63,10 @@
       <strong>My whole vault</strong>
       <span>Pick the folder, then choose a chapter</span>
     </button>
+    <button class="big" id="pick-docx">
+      <strong>A Word document</strong>
+      <span>Turn a .docx into a chapter in your vault</span>
+    </button>
   </div>
   <p class="note" id="choose-note"></p>
   <p class="quiet">You will be asked again each time you run the tool. Nothing is
@@ -223,10 +227,133 @@
   </div>
 </section>
 
+<!-- ============ bringing in a Word document ============ -->
+
+<!-- W0. the converter is not on this Mac yet -->
+<section id="step-import-setup" class="step hidden">
+  <h2>One thing is missing</h2>
+  <p>To turn a Word document into a chapter, this tool uses a separate free
+  program called <strong>pandoc</strong>. It is not on this Mac yet.</p>
+  <p>Everything else in the tool carries on working exactly as normal — this is
+  only needed for Word documents.</p>
+
+  <div class="card">
+    <p class="card-label">What happens if you press the button</p>
+    <p>The tool downloads pandoc's own installer, checks that it really is signed
+    by the people who make it, and opens it for you. An installer window appears:
+    press <strong>Continue</strong>, then <strong>Install</strong>. It asks for
+    this Mac's password, which is normal for any installer.</p>
+    <p class="quiet">The download is about 40&nbsp;MB, so it takes a minute or
+    two. Nothing in your vault is touched, and nothing about the rest of this
+    tool changes.</p>
+  </div>
+
+  <p id="install-message" class="quiet"></p>
+
+  <div class="actions">
+    <button class="primary" id="install-pandoc">Download and open the installer</button>
+    <button id="install-recheck">Check again</button>
+    <button class="link" id="import-setup-back">Go back</button>
+  </div>
+</section>
+
+<!-- W1. what to bring in, and where it goes -->
+<section id="step-import" class="step hidden">
+  <h2>Bring in a Word document</h2>
+  <p>This makes a new chapter in your vault from a Word document. Your Word
+  document is not changed and not moved — it is read, and left exactly where it
+  is.</p>
+
+  <ol class="steps">
+    <li>
+      <strong>The Word document</strong>
+      <p class="quiet" id="docx-chosen">Nothing chosen yet.</p>
+      <button id="choose-docx">Choose a Word document…</button>
+    </li>
+    <li>
+      <strong>Where it should go in your vault</strong>
+      <p class="quiet" id="folder-chosen">Nothing chosen yet.</p>
+      <button id="choose-import-folder">Choose a folder…</button>
+    </li>
+    <li>
+      <strong>What the chapter should be called</strong>
+      <p class="quiet">This is the name you will see in Obsidian.</p>
+      <input type="text" id="import-name" placeholder="Chapter name" spellcheck="false">
+      <p class="note" id="name-problem"></p>
+    </li>
+  </ol>
+
+  <div class="actions">
+    <button class="primary" id="do-convert" disabled>Convert and show me</button>
+    <button class="link" data-back="step-choose">Go back</button>
+  </div>
+  <p class="quiet">Nothing is written into your vault until you have seen the
+  result and said yes.</p>
+</section>
+
+<!-- W2. what came out -->
+<section id="step-import-preview" class="step hidden">
+  <h2>Here is what came out</h2>
+  <p id="import-summary"></p>
+
+  <h3>What to check</h3>
+  <p class="quiet">Word can hold things that a chapter file cannot. These are the
+  parts of this document worth your eyes.</p>
+  <div id="import-notes"></div>
+
+  <h3>The chapter as it will be saved</h3>
+  <p class="quiet" id="import-target"></p>
+  <div class="tabbody"><pre id="import-text"></pre></div>
+
+  <div id="import-media-block" class="hidden">
+    <h3>The pictures</h3>
+    <p class="quiet" id="import-media-note"></p>
+    <ul class="summary-list" id="import-media-list"></ul>
+  </div>
+
+  <div class="warnbox">
+    <h3>Please read this before you continue</h3>
+    <p>When you press the button below, a new chapter is written into your vault,
+    along with a folder of pictures if there were any.</p>
+    <p><strong>Nothing existing is overwritten.</strong> If a chapter of this name
+    already appeared while you were reading, the tool stops and tells you rather
+    than replacing it.</p>
+    <label class="check confirm"><input type="checkbox" id="import-confirm">
+      <span>I have looked at the chapter above and I want to save it.</span></label>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="do-import-save" disabled>Save this chapter</button>
+    <button class="link" id="import-preview-back">Go back and change something</button>
+  </div>
+</section>
+
+<!-- W3. saved, and what to do next -->
+<section id="step-import-done" class="step hidden">
+  <h2>The chapter is in your vault</h2>
+  <div id="import-done-summary"></div>
+
+  <div class="card">
+    <p class="card-label">Worth doing now</p>
+    <p>A chapter that has just come out of Word has no links in it at all. The
+    tool can go through it now and offer to link its citations, its concept-page
+    mentions, and pick out terms for your glossary — the same three questions as
+    always.</p>
+    <p class="quiet">You can also leave it and do this another day. It is the
+    same as choosing this chapter from the front screen.</p>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="import-analyse">Go through this chapter now</button>
+    <button class="link" id="import-another">Bring in another Word document</button>
+    <button class="link" id="import-finish">Not now</button>
+  </div>
+</section>
+
 <section id="step-stopped" class="step hidden">
   <h2>The tool has stopped</h2>
-  <p>You can close this browser tab, and close the black Terminal window if it is
-  still open.</p>
+  <p>You can close this browser tab. Nothing else is left running, and there is
+  nothing else to close.</p>
 </section>
 
 <!-- ============ the console ============ -->

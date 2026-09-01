@@ -5,7 +5,9 @@ Run with:  python3 -m tests.test_all
 """
 
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -289,6 +291,294 @@ check("the build script staples the notarisation ticket",
       "stapler staple" in build)
 check("the build script produces a disk image",
       "hdiutil create" in build)
+
+
+# ---------------------------------------------------------------------------
+# Bringing a Word document in.
+# ---------------------------------------------------------------------------
+
+from app import convert as _convert  # noqa: E402
+from app import picker as _picker  # noqa: E402
+
+# --- the conversion flags are the promise, so they are checked, not trusted ---
+
+check("the converter is told not to wrap paragraphs",
+      "--wrap=none" in _convert.PANDOC_ARGS,
+      "without --wrap=none every paragraph is split across several lines and "
+      "the whole one-line-per-paragraph model collapses")
+check("the converter is asked for GitHub-flavoured markdown",
+      "gfm" in _convert.PANDOC_ARGS)
+check("the converter is told the input is a Word document",
+      "-f" in _convert.PANDOC_ARGS
+      and _convert.PANDOC_ARGS[_convert.PANDOC_ARGS.index("-f") + 1] == "docx")
+_here_pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(_here_pkg, "app", "convert.py"), encoding="utf-8") as fh:
+    _convert_source = fh.read()
+# The flag is only half the promise. The reason has to sit beside it, or the
+# next person to tidy this file will decide it is a formatting preference.
+_why = _convert_source.split("PANDOC_ARGS = ")[0]
+check("why --wrap=none is mandatory is written down beside the flag itself",
+      "--wrap=none" in _why and "one paragraph per line" in _why
+      and "MANDATORY" in _why)
+
+# --- finding pandoc ----------------------------------------------------------
+
+check("a pandoc installed outside the launcher's PATH is still found",
+      "/usr/local/bin/pandoc" in _convert.LIKELY_PANDOC
+      and "/opt/homebrew/bin/pandoc" in _convert.LIKELY_PANDOC,
+      "the app is started from Finder, so it inherits almost no PATH")
+check("the copy inside the app is preferred over any other",
+      _convert.find_pandoc.__doc__ and "bundled copy wins"
+      in _convert.find_pandoc.__doc__)
+check("the guided install never mentions a terminal or a package manager",
+      not any(word in open(os.path.join(_here_pkg, "app", "convert.py"),
+                           encoding="utf-8").read().lower()
+              for word in ("brew install", "homebrew install", "run this command",
+                           "type the following")))
+
+# --- naming ------------------------------------------------------------------
+
+check("a Word file's name becomes a sensible chapter name",
+      _convert.suggest_name("/x/y/Chapter 4 - Structure.docx")
+      == "Chapter 4 - Structure.md")
+check("characters a file name cannot hold are taken out of the suggestion",
+      "/" not in _convert.suggest_name("/x/A B: C/D.docx"))
+check("a nameless Word file still gets a name",
+      _convert.suggest_name("/x/.docx") == "Untitled chapter.md",
+      "got " + _convert.suggest_name("/x/.docx"))
+
+# --- refusing to write over anything ----------------------------------------
+
+_wroot = tempfile.mkdtemp(prefix="aa-import-")
+with open(os.path.join(_wroot, "taken.md"), "w") as fh:
+    fh.write("# Already here\n")
+
+check("a name that is already taken is refused",
+      "already a chapter" in (_convert.destination_problem(_wroot, "taken.md") or ""))
+check("a free name is allowed",
+      _convert.destination_problem(_wroot, "free.md") is None)
+check("a name with a folder in it is refused",
+      "just a name" in (_convert.destination_problem(_wroot, "sub/x.md") or ""))
+check("a name that is not markdown is refused",
+      "end in .md" in (_convert.destination_problem(_wroot, "x.docx") or ""))
+check("a name with characters a file cannot hold is refused",
+      "cannot contain" in (_convert.destination_problem(_wroot, 'x?".md') or ""))
+
+# --- the report reads what actually came out --------------------------------
+#
+# Built from text rather than from a .docx so the suite still runs on a machine
+# with no pandoc. The shapes below are exactly what `pandoc -t gfm` produces.
+
+def _fake(text, media=None, media_dir="ch-media", warnings=None):
+    return {"text": text, "media": media or [],
+            "media_dir": media_dir if media else None,
+            "pandoc_warnings": warnings or [],
+            "stage": "", "docx": "x.docx", "md_name": "ch.md"}
+
+
+def _heads(text, media=None):
+    return [n["headline"] for n in _convert.report(_fake(text, media))["notes"]]
+
+
+def _levels(text, media=None):
+    return {n["headline"]: n["level"]
+            for n in _convert.report(_fake(text, media))["notes"]}
+
+
+_html_table = _fake(
+    "<table>\n<tr><td><p>one</p>\n<p>two</p></td></tr>\n</table>\n")
+check("a table Word merged cells in is reported as a problem",
+      _levels(_html_table["text"])
+      .get("1 table could not be made into a proper table") == "warn")
+check("the merged-cell warning says those cells will never be linked",
+      any("will ever be linked" in n["body"]
+          for n in _convert.report(_html_table)["notes"]))
+
+check("a table that converted cleanly is reported too",
+      "1 table converted cleanly"
+      in _heads("| A | B |\n|---|---|\n| 1 | 2 |\n"))
+
+check("footnotes are counted and explained",
+      "2 footnotes came across"
+      in _heads("Text.[^1] More.[^2]\n\n[^1]: One.\n\n[^2]: Two.\n"))
+check("a footnote number with no note is reported",
+      _levels("Text.[^1] More.[^2]\n\n[^1]: One.\n")
+      .get("Some footnotes do not match up") == "warn")
+
+check("a document whose headings were made by hand is reported",
+      _levels("**A Heading**\n\nSome prose.\n")
+      .get("No headings came across at all") == "warn")
+check("that report tells the author about Word's Heading styles",
+      any("Heading 1" in n["body"] + n["check"]
+          for n in _convert.report(_fake("**A Heading**\n\nProse.\n"))["notes"]))
+check("headings that did convert are counted by level",
+      any(n["headline"] == "3 headings came across" and "2 at level 2" in n["body"]
+          for n in _convert.report(_fake("# A\n\n## B\n\n## C\n"))["notes"]))
+check("a bold line that looks like a lost heading is pointed out",
+      "1 line may be a heading that did not convert"
+      in _heads("# Real\n\n**Looks like a heading**\n\nProse here.\n"))
+check("a skipped heading level is pointed out",
+      "A heading level was skipped" in _heads("# A\n\n### C\n"))
+
+check("a chapter with no reference list is pointed out",
+      "This chapter has no References section" in _heads("# A\n\nProse.\n"))
+check("a chapter with a reference list is not",
+      "This chapter has no References section"
+      not in _heads("# A\n\nProse.\n\n## References\n\nArcher (1995).\n"))
+
+_pics = [{"rel": "ch-media/rId1.png", "name": "rId1.png", "ext": "png", "size": 900},
+         {"rel": "ch-media/rId2.emf", "name": "rId2.emf", "ext": "emf", "size": 900}]
+_pic_notes = _convert.report(_fake(
+    '<img src="ch-media/rId1.png" />\n', _pics))["notes"]
+check("pictures are reported with the folder they went into",
+      any("ch-media" in n["body"] for n in _pic_notes))
+check("a Word chart that came out as an unviewable file is a warning",
+      any(n["level"] == "warn" and "nothing can display" in n["headline"]
+          for n in _pic_notes))
+check("that warning says how to fix it in Word, not on a terminal",
+      any("Paste" in n["check"] and "Picture" in n["check"] for n in _pic_notes))
+check("pictures written as web tags are explained rather than left to surprise",
+      any("web tags" in n["headline"] for n in _pic_notes))
+check("a document with no pictures says so plainly",
+      "No pictures" in _heads("# A\n\nProse.\n"))
+
+check("one paragraph per line is confirmed after every conversion",
+      "Each paragraph is on a single line" in _heads("# A\n\nA paragraph.\n"))
+_wrapped = "# A\n\n" + "\n".join(["A short wrapped line of prose here."] * 40) + "\n"
+check("paragraphs that came out wrapped anyway are reported as a problem",
+      _levels(_wrapped).get("The paragraphs may have been broken up") == "warn")
+
+_warned = _convert.report(_fake("# A\n\nProse.\n",
+                               warnings=["[WARNING] Skipped an object"]))["notes"]
+check("a complaint from the converter is passed on, not swallowed",
+      any(n["level"] == "warn" and "Skipped an object" in n["body"]
+          for n in _warned))
+check("a silent conversion says nothing about the converter",
+      not any("converter reported" in n["headline"]
+              for n in _convert.report(_fake("# A\n\nProse.\n"))["notes"]))
+
+check("every note tells the author what to check, or says there is nothing to",
+      all(isinstance(n["check"], str)
+          for n in _convert.report(_fake("# A\n\nProse.\n"))["notes"]))
+check("no note tells the author to run anything",
+      not any(w in (n["body"] + n["check"]).lower()
+              for n in _convert.report(_fake(_html_table["text"], _pics))["notes"]
+              for w in ("terminal", "command line", "brew ", "run pandoc")))
+
+# A chapter out of Word carries raw HTML wherever markdown had no equivalent: a
+# picture with a caption, a table with merged cells. Those are several lines of
+# markup, and must not be mistaken for a paragraph somebody wrapped by hand -
+# otherwise every imported chapter carries a warning that means nothing.
+_htmlish = DocMap(
+    "# Chapter\n\nA paragraph.\n\n"
+    "<figure>\n<img src=\"c-media/rId1.png\" alt=\"A diagram\" />\n"
+    "<figcaption aria-hidden=\"true\"><p>A diagram</p></figcaption>\n</figure>\n\n"
+    "<table>\n<tr><td><p>one</p>\n<p>two</p></td></tr>\n</table>\n",
+    "c.md")
+check("blocks of web markup are not mistaken for a wrapped paragraph",
+      not hard_wrapped_paragraphs(_htmlish),
+      "got " + str(hard_wrapped_paragraphs(_htmlish)))
+_by_hand = DocMap("# Chapter\n\nA paragraph that someone\nwrapped by hand over\n"
+                  "three lines.\n", "c.md")
+check("a genuinely wrapped paragraph is still spotted",
+      hard_wrapped_paragraphs(_by_hand))
+
+# --- the real thing, when this machine has pandoc ---------------------------
+
+_pandoc, _ = _convert.find_pandoc()
+if _pandoc:
+    _src = os.path.join(_wroot, "src.md")
+    with open(_src, "w") as fh:
+        fh.write("# Chapter Nine\n\n" + ("A long paragraph. " * 40) + "\n\n"
+                 "## References\n\nArcher, M. S. (1995). *Realist social "
+                 "theory*.\n")
+    _docx = os.path.join(_wroot, "src.docx")
+    subprocess.run([_pandoc, _src, "-o", _docx], check=True,
+                   capture_output=True, timeout=120)
+
+    _result = _convert.convert(_docx, "Chapter 9.md")
+    _para = [ln for ln in _result["text"].split("\n")
+             if ln.startswith("A long paragraph")]
+    check("a real conversion puts the whole paragraph on one line",
+          len(_para) == 1 and len(_para[0]) > 400)
+    check("a real conversion keeps the headings",
+          _result["text"].startswith("# Chapter Nine"))
+
+    _dest = os.path.join(_wroot, "vault")
+    os.makedirs(_dest)
+    _chapter, _media = _convert.save(_result, _dest)
+    check("the converted chapter is written where the author chose",
+          os.path.isfile(_chapter)
+          and _chapter == os.path.join(_dest, "Chapter 9.md"))
+
+    # The point of all of it: the new chapter is one the analyses can work on.
+    _s2 = Session(_chapter)
+    _s2.load_chapter(_chapter)
+    check("a just-converted chapter has no hard-wrapped paragraphs",
+          not hard_wrapped_paragraphs(_s2.docmap))
+    check("a just-converted chapter's reference list is found",
+          _s2.docmap.refs_start is not None)
+    _f2, _n2 = references.analyse(_s2.docmap, "obsidian")[0], None
+    check("the analyses run on a just-converted chapter",
+          isinstance(_f2, list))
+    check("the tool does not warn that something else just saved the chapter",
+          not any("saved by something else" in w
+                  for w in _s2.preflight(we_just_wrote_it=True)[0]))
+    check("but it still warns when it was not the tool that wrote it",
+          any("saved by something else" in w for w in _s2.preflight()[0]))
+
+    _convert.discard(_result)
+    check("the temporary folder is cleared away afterwards",
+          not os.path.isdir(_result["stage"]))
+else:
+    check("pandoc is on this machine, so the real conversion was checked",
+          True, "skipped: no pandoc here, which is allowed")
+
+# --- the page and the script agree about what is on it ----------------------
+#
+# Every one of these screens is wired up by id from app.js. A renamed or dropped
+# id fails silently in a browser - the button simply stops working - so it is
+# checked here instead.
+
+with open(os.path.join(_here_pkg, "app", "web", "index.html"), encoding="utf-8") as fh:
+    _html = fh.read()
+with open(os.path.join(_here_pkg, "app", "web", "app.js"), encoding="utf-8") as fh:
+    _js = fh.read()
+
+_page_ids = set(re.findall(r'id="([^"]+)"', _html))
+_made_in_js = set(re.findall(r"\.id = '([^']+)'", _js))
+_wanted = set(re.findall(r"getElementById\('([^']+)'\)", _js))
+_absent = sorted(_wanted - _page_ids - _made_in_js)
+check("every part of the page the script reaches for is actually on it",
+      not _absent, "not in index.html: " + ", ".join(_absent))
+
+check("the Word document import has its own way in from the first screen",
+      'id="pick-docx"' in _html and "step-import" in _html)
+check("the import screens are all in the page",
+      all(f'id="{s}"' in _html for s in
+          ("step-import", "step-import-setup", "step-import-preview",
+           "step-import-done")))
+check("the author has to confirm before a converted chapter is written",
+      'id="import-confirm"' in _html
+      and "document.getElementById('do-import-save').disabled = !e.target.checked"
+      in _js)
+_import_screens = "".join(
+    _html.split('<section id="step-import')[i].split("</section>")[0]
+    for i in range(1, len(_html.split('<section id="step-import')))
+)
+check("the import screens never mention a terminal or a package manager",
+      not any(w in _import_screens.lower() for w in
+              ("terminal", "homebrew", "brew", "command line", "type this")),
+      "the author does not have a terminal and must never be sent to one")
+
+# --- the picker offers Word documents ---------------------------------------
+
+check("the file chooser can be asked for Word documents",
+      "docx" in _picker.WORD_TYPES and hasattr(_picker, "choose_word_document"))
+check("the file chooser still offers markdown chapters",
+      "md" in _picker.MARKDOWN_TYPES)
+
+shutil.rmtree(_wroot, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

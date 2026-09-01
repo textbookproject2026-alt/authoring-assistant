@@ -41,13 +41,16 @@ with a phrase like "X is defined as", terms you put in **bold** the first time
 you use them, and capitalised terms you use more than once. Ones you approve are
 added to a single `glossary.md`, in alphabetical order.
 
+It also does one thing that is not a question: it can turn a **Word document**
+into a chapter in your vault. See "Bringing in a Word document" below.
+
 ---
 
 ## Using it
 
 1. Double-click **Authoring Assistant**. Your browser opens.
-2. Choose either a single chapter or your whole vault folder. A normal Mac
-   "choose a file" window appears — you never type a path.
+2. Choose a single chapter, your whole vault folder, or a Word document to bring
+   in. A normal Mac "choose a file" window appears — you never type a path.
 3. If you chose a folder, pick the chapter you want from the list.
 4. Answer the questions. Each one shows you the sentence, with the proposed
    change highlighted, and offers:
@@ -102,6 +105,99 @@ across nine lines, exactly nine lines change.
 If you run it again on the same chapter it will find nothing to do. It skips
 citations that are already linked, concept pages that are already linked, and
 terms already in your glossary, and it tells you what it skipped and why.
+
+---
+
+## Bringing in a Word document
+
+If a chapter still lives in Word, the tool can turn it into a chapter in your
+vault. Press **A Word document** on the first screen.
+
+You choose three things: the Word document, the folder in your vault it should go
+into, and what the chapter should be called. The name is filled in from the Word
+file's own name, and you can change it.
+
+Then you are shown **the whole converted chapter before anything is written**,
+together with a list of the things worth checking. Nothing reaches your vault
+until you have read it and ticked the box.
+
+Your Word document is never changed and never moved. It stays exactly where it
+is, and you can go back to it at any time.
+
+### What to expect
+
+Word can hold things that a chapter file cannot, so some parts come across better
+than others. The tool tells you which, every time, for the document in front of
+you. In general:
+
+**Pictures** are taken out of the Word file and put in a folder next to the
+chapter, named after it — a chapter called `Chapter 6.md` gets a folder called
+`Chapter 6-media`. Obsidian finds them there on its own. Two things to watch for.
+The picture files keep the meaningless names Word gave them inside the document,
+which you may want to rename later. And **charts, SmartArt and pasted
+spreadsheets are not really pictures** — Word draws them itself — so they come out
+as files nothing outside Word can display, and show as broken pictures. The tool
+warns you when it finds one. The fix is in Word: copy the chart, paste it back as
+a picture, save, and bring the file in again.
+
+Pictures with a caption, or sitting inside a paragraph, are written using web
+tags — `<img src="…">` — rather than markdown's shorter form. This is normal.
+Obsidian displays them correctly; they only look like code while you are editing.
+
+**Tables** with ordinary cells come across as proper tables and look right. Column
+widths, shading and colour are lost, because markdown cannot hold them. A table
+whose cells have been **merged**, or where one cell holds more than one paragraph,
+cannot become a markdown table at all: it is written as a block of web markup
+instead. Nothing in it is lost, and Obsidian still shows it as a table — but it is
+unpleasant to edit, and **the citation and concept-page checks skip over it
+entirely**, so nothing inside such a table will ever be linked. If the table is
+simple enough, it is worth unmerging the cells in Word and bringing the file in
+again.
+
+**Footnotes** come across, but not where they were. Word puts them at the foot of
+each page; markdown has no pages, so they are all collected at the very bottom of
+the chapter, with a number like `[^1]` where each one belonged. Obsidian shows
+them as proper footnotes when you read the chapter. Worth scrolling to the end to
+check the last one is complete. If a footnote number and its note do not match up
+— usually because one was deleted in Word without the other — the tool says so.
+
+**Headings** convert only if they were made with Word's **Heading styles**. If
+the headings in your document were made by hand, by making the text bigger and
+bold, Word considers them ordinary paragraphs and so does everything else. The
+tool tells you when a document has no headings at all, and points out lines that
+look like a heading written that way. You can put a `#` in front of each one in
+Obsidian afterwards, but if there are many it is quicker to apply Heading 1 and
+Heading 2 in Word and bring the file in again.
+
+**Everything else.** Underlining, coloured text and highlighting have no markdown
+equivalent and come across as markers like `[text]{.underline}`. Word bookmarks
+appear as `[]{#name}` and show nothing when read. Equations from Word's equation
+editor come across as maths between dollar signs; equations pasted in as pictures
+stay pictures. Text boxes and sidebars become blocks of web markup. The tool
+lists whichever of these it actually finds.
+
+### Afterwards
+
+A chapter fresh out of Word has no links in it at all, so the tool offers to go
+through it straight away with the same three questions as ever — citations,
+concept pages and glossary terms — so the chapter arrives linked rather than raw.
+You can also say "not now" and do it another day; it is the same as choosing that
+chapter from the front screen.
+
+### The one thing that might need installing
+
+To read Word documents the tool uses a separate free program called **pandoc**.
+It normally comes inside the app, so there is nothing to do.
+
+If your copy does not have it, the tool says so the first time you try to bring in
+a Word document, and offers to install it for you: it downloads pandoc's own
+installer, checks that it really is signed by the people who make it, and opens
+it. An installer window appears — press **Continue**, then **Install**. It asks
+for this Mac's password, which is normal for any installer. When it has finished,
+come back and press **Check again**.
+
+You are never asked to type a command. Everything else in the tool works as
+normal whether or not pandoc is there — it is only needed for Word documents.
 
 ---
 
@@ -244,3 +340,17 @@ somewhere else, choose your whole vault folder rather than a single chapter.
 
 **Nothing at all was found.** That usually means you have already run it on that
 chapter. The final screen explains what was skipped.
+
+**"That file could not be read as a Word document."** The tool needs a `.docx` —
+the kind Word has saved since 2007. An older `.doc`, or a file renamed to end in
+`.docx`, will not work. Open it in Word and use **File**, then **Save As**, to
+save it as a `.docx` first.
+
+**"There is already a chapter called … in that folder."** The tool never writes
+over a file that already exists, because there is no undo. Give the new chapter a
+different name, or move the old one out of the way in Finder first.
+
+**A picture shows as broken in the new chapter.** It was almost certainly a chart,
+a SmartArt diagram or a pasted spreadsheet rather than a real picture. In Word,
+right-click it, choose **Copy**, then **Paste Special** as a **Picture**, save, and
+bring the file in again.

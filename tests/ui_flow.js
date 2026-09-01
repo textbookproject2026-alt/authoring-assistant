@@ -29,7 +29,9 @@ const els = {};
 ids.forEach(i => els[i] = mkEl(i));
 
 const steps = ['step-choose','step-chapter','step-options','step-working','step-review',
-               'step-preview','step-done','step-stopped'];
+               'step-preview','step-done','step-stopped',
+               'step-import','step-import-setup','step-import-preview',
+               'step-import-done'];
 steps.forEach(s => els[s].classList.add('step'));
 
 const groupSpans = [mkEl('grp1'), mkEl('grp2')];
@@ -79,6 +81,10 @@ const FINDINGS = [
 ];
 
 let lastPreviewBody = null;
+let lastConvertBody = null;
+// Flipped part-way through the run, to check the screen shown when the
+// converter is missing and the one shown once it has been installed.
+let IMPORT_READY = { ready: false, where: null, version: null, can_install: true };
 const calls = [];
 const fetch = async (route, opts) => {
   calls.push(route);
@@ -97,6 +103,47 @@ const fetch = async (route, opts) => {
     '/api/clear-key': { cleared: true, deepseek: false },
     '/api/quit': { stopping: true },
     '/api/analyse': { findings: FINDINGS, notes: ['A note for the author.'] },
+
+    '/api/import/status': IMPORT_READY,
+    '/api/import/pick-docx': {
+      docx: '/Users/x/Documents/Chapter 6.docx', docx_name: 'Chapter 6.docx',
+      suggested_name: 'Chapter 6.md', size: 41000,
+    },
+    '/api/import/pick-folder': {
+      folder: '/v/Chapters', folder_name: 'Chapters', chapters_here: 5,
+    },
+    '/api/import/convert': (() => { lastConvertBody = body; return {
+      name: 'Chapter 6.md', path: '/v/Chapters/Chapter 6.md',
+      text: '# Chapter Six\n\nA paragraph.\n', folder: '/v/Chapters',
+      media_dir: 'Chapter 6-media',
+      media: [{ rel: 'Chapter 6-media/rId1.png', name: 'rId1.png', ext: 'png', size: 2048 }],
+      counts: { lines: 3, words: 4, pictures: 1, headings: 1,
+                pipe_tables: 0, html_tables: 1, footnotes: 2 },
+      notes: [
+        { level: 'ok', headline: '1 picture was taken out of the Word file',
+          body: 'It is in a folder called "Chapter 6-media".', check: 'Look at it.' },
+        { level: 'warn', headline: '1 table could not be made into a proper table',
+          body: 'Its cells were merged.', check: 'Unmerge them in Word.' },
+      ],
+    }; })(),
+    '/api/import/save': {
+      chapter: '/v/Chapters/Chapter 6.md', chapter_name: 'Chapter 6.md',
+      media: '/v/Chapters/Chapter 6-media', media_name: 'Chapter 6-media',
+      folder: '/v/Chapters',
+    },
+    '/api/import/cancel': { ok: true },
+    '/api/open': {
+      session_id: 'S1', mode: 'file', root: '/v', root_name: 'v',
+      chapters: [{ path: '/v/Chapters/Chapter 6.md', rel: 'Chapter 6.md',
+                   name: 'Chapter 6', folder: '', size: 30 }],
+      glossary_path: '/v/glossary.md', glossary_exists: false,
+    },
+    '/api/prepare': {
+      chapter: '/v/Chapters/Chapter 6.md', chapter_name: 'Chapter 6.md',
+      warnings: [], blockers: [], hard_wrapped: false, lines: 3,
+      has_references: true, concept_pages: ['Emergence'],
+      concept_source: 'Definitions', deepseek: false,
+    },
     '/api/preview': (() => { lastPreviewBody = body; return {
       counts: { references: 1, terms: 2, glossary: 1, expanded: 1 },
       diff: [{ line_no: 5, before: 'a', after: 'b' }],
@@ -224,6 +271,73 @@ function check(name, cond, got) {
   els['confirm-box'].onchange({ target: { checked: true } });
   check('ticking the box enables saving', els['do-commit'].disabled === false,
         els['do-commit'].disabled);
+
+  // --- bringing in a Word document ------------------------------------------
+
+  await els['pick-docx'].onclick();
+  check('with no converter on the Mac, the author is offered the install, not an error',
+        !els['step-import-setup'].classList.contains('hidden'), 'wrong screen');
+  check('the install screen never tells the author to type a command',
+        !/terminal|brew|command line/i.test(html.split('step-import-setup')[1]
+          .split('</section>')[0]), 'a command appears on the install screen');
+
+  IMPORT_READY = { ready: true, where: 'bundled', version: '3.11', can_install: false };
+  await els['install-recheck'].onclick();
+  check('once the converter is there, the author goes on to the import screen',
+        !els['step-import'].classList.contains('hidden'), 'wrong screen');
+  check('nothing can be converted before a document and a folder are chosen',
+        els['do-convert'].disabled === true, els['do-convert'].disabled);
+
+  await els['choose-docx'].onclick();
+  check('choosing a Word document fills in a suggested chapter name',
+        els['import-name'].value === 'Chapter 6.md', els['import-name'].value);
+  check('it is still not ready, because there is nowhere to put it',
+        els['do-convert'].disabled === true, els['do-convert'].disabled);
+
+  await els['choose-import-folder'].onclick();
+  check('choosing a folder says how many chapters are already there',
+        els['folder-chosen'].textContent.includes('5 chapters'),
+        els['folder-chosen'].textContent);
+  check('with all three chosen, converting is offered',
+        els['do-convert'].disabled === false, els['do-convert'].disabled);
+
+  els['import-name'].value = 'Chapter 6.md';
+  await els['do-convert'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('the chosen name is what gets converted',
+        lastConvertBody && lastConvertBody.name === 'Chapter 6.md',
+        lastConvertBody);
+  check('the result is shown before anything is written',
+        !els['step-import-preview'].classList.contains('hidden'), 'wrong screen');
+  check('every note about what to check is shown',
+        els['import-notes'].children.length === 2,
+        els['import-notes'].children.length);
+  check('the whole converted chapter is shown, not a summary of it',
+        els['import-text'].textContent.includes('A paragraph.'),
+        els['import-text'].textContent);
+  check('the pictures are listed with where they will go',
+        els['import-media-list'].children.length === 1 &&
+        els['import-media-note'].textContent.includes('Chapter 6-media'),
+        els['import-media-note'].textContent);
+  check('saving is refused until the author says they have looked',
+        els['do-import-save'].disabled === true, els['do-import-save'].disabled);
+
+  els['import-confirm'].onchange({ target: { checked: true } });
+  check('ticking the box allows saving', els['do-import-save'].disabled === false,
+        els['do-import-save'].disabled);
+
+  await els['do-import-save'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('after saving, the author is told where the chapter and pictures went',
+        !els['step-import-done'].classList.contains('hidden') &&
+        els['import-done-summary'].children.length > 0, 'nothing shown');
+
+  await els['import-analyse'].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('the new chapter can go straight into the three analyses',
+        calls.includes('/api/open') && calls.includes('/api/prepare'), calls);
+  check('and it lands on the options screen, ready to be looked through',
+        !els['step-options'].classList.contains('hidden'), 'wrong screen');
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

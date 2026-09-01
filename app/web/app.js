@@ -458,6 +458,238 @@ document.getElementById('finish').onclick = async () => {
   show('step-stopped');
 };
 
+/* ---------- bringing in a Word document ---------- */
+/* Nothing reaches the vault until the author has read the converted chapter and
+   ticked the box. Everything before that happens in a temporary folder. */
+
+const W = {
+  docx: null,
+  folder: null,
+  saved: null,      // { chapter, media } once written
+};
+
+document.getElementById('pick-docx').onclick = enterImport;
+
+async function enterImport() {
+  let st;
+  try { st = await api('/api/import/status', {}); } catch (e) { return fail(e.message); }
+  if (!st.ready) {
+    document.getElementById('install-message').textContent = '';
+    return show('step-import-setup');
+  }
+  renderImportStep();
+  show('step-import');
+}
+
+document.getElementById('import-setup-back').onclick = () => show('step-choose');
+
+document.getElementById('install-recheck').onclick = async () => {
+  const msg = document.getElementById('install-message');
+  msg.textContent = 'Looking…';
+  msg.className = 'quiet';
+  try {
+    const st = await api('/api/import/status', {});
+    if (st.ready) {
+      ENV.pandoc = true;
+      renderImportStep();
+      return show('step-import');
+    }
+    msg.textContent = 'It is still not there. If the installer window is open, ' +
+      'finish it first, then press this again.';
+    msg.className = 'quiet bad';
+  } catch (e) { msg.textContent = e.message; msg.className = 'quiet bad'; }
+};
+
+document.getElementById('install-pandoc').onclick = async () => {
+  const btn = document.getElementById('install-pandoc');
+  const msg = document.getElementById('install-message');
+  btn.disabled = true;
+  msg.className = 'quiet';
+  msg.textContent = 'Downloading. This takes a minute or two — please leave this ' +
+    'page open.';
+  try {
+    const r = await api('/api/import/install', {});
+    msg.textContent = r.message;
+    msg.className = 'quiet good';
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.className = 'quiet bad';
+  } finally { btn.disabled = false; }
+};
+
+function renderImportStep() {
+  document.getElementById('docx-chosen').textContent =
+    W.docx ? W.docx.docx_name : 'Nothing chosen yet.';
+  document.getElementById('folder-chosen').textContent =
+    W.folder ? W.folder.folder : 'Nothing chosen yet.';
+  checkImportReady();
+}
+
+function checkImportReady() {
+  const name = document.getElementById('import-name').value.trim();
+  const problem = document.getElementById('name-problem');
+  let why = '';
+  if (name && /[/\\:*?"<>|]/.test(name)) {
+    why = 'A chapter name cannot contain any of these: / \\ : * ? " < > |';
+  }
+  problem.textContent = why;
+  document.getElementById('do-convert').disabled =
+    !(W.docx && W.folder && name && !why);
+}
+document.getElementById('import-name').oninput = checkImportReady;
+
+document.getElementById('choose-docx').onclick = async () => {
+  try {
+    const r = await api('/api/import/pick-docx', {});
+    if (r.cancelled) return;
+    if (r.error) return fail(r.error);
+    W.docx = r;
+    const nameBox = document.getElementById('import-name');
+    if (!nameBox.value.trim()) nameBox.value = r.suggested_name;
+    renderImportStep();
+  } catch (e) { fail(e.message); }
+};
+
+document.getElementById('choose-import-folder').onclick = async () => {
+  try {
+    const r = await api('/api/import/pick-folder', {});
+    if (r.cancelled) return;
+    if (r.error) return fail(r.error);
+    W.folder = r;
+    document.getElementById('folder-chosen').textContent =
+      r.folder + (r.chapters_here
+        ? `  —  ${r.chapters_here} chapter${r.chapters_here === 1 ? '' : 's'} already here`
+        : '  —  no chapters here yet');
+    checkImportReady();
+  } catch (e) { fail(e.message); }
+};
+
+document.getElementById('do-convert').onclick = async () => {
+  show('step-working');
+  document.getElementById('working-note').textContent =
+    'Reading the Word document. A long chapter with many pictures can take a moment.';
+  try {
+    const r = await api('/api/import/convert', {
+      name: document.getElementById('import-name').value.trim(),
+    });
+    renderImportPreview(r);
+    show('step-import-preview');
+  } catch (e) { fail(e.message); show('step-import'); }
+};
+
+function renderImportPreview(r) {
+  const c = r.counts;
+  const bits = [`${c.words.toLocaleString()} words`];
+  if (c.headings) bits.push(`${c.headings} heading${c.headings === 1 ? '' : 's'}`);
+  if (c.pipe_tables + c.html_tables)
+    bits.push(`${c.pipe_tables + c.html_tables} table${c.pipe_tables + c.html_tables === 1 ? '' : 's'}`);
+  if (c.footnotes) bits.push(`${c.footnotes} footnote${c.footnotes === 1 ? '' : 's'}`);
+  if (c.pictures) bits.push(`${c.pictures} picture${c.pictures === 1 ? '' : 's'}`);
+  document.getElementById('import-summary').textContent =
+    `${W.docx.docx_name} became a chapter of ${bits.join(', ')}.`;
+
+  const box = document.getElementById('import-notes');
+  box.innerHTML = '';
+  r.notes.forEach(n => {
+    const d = el('div', 'finding-note ' + n.level);
+    d.appendChild(el('div', 'fn-head', n.headline));
+    d.appendChild(el('div', 'fn-body', n.body));
+    if (n.check) {
+      const c2 = el('div', 'fn-check');
+      c2.appendChild(el('strong', '', 'What to check: '));
+      c2.appendChild(document.createTextNode(n.check));
+      d.appendChild(c2);
+    }
+    box.appendChild(d);
+  });
+
+  document.getElementById('import-target').textContent =
+    'It will be saved as ' + r.path;
+  document.getElementById('import-text').textContent = r.text;
+
+  const mBlock = document.getElementById('import-media-block');
+  const mList = document.getElementById('import-media-list');
+  mList.innerHTML = '';
+  if (r.media.length) {
+    mBlock.classList.remove('hidden');
+    document.getElementById('import-media-note').textContent =
+      `These will be saved in a folder called “${r.media_dir}”, next to the chapter.`;
+    r.media.forEach(m => {
+      const li = el('li');
+      li.appendChild(el('strong', '', m.name));
+      li.appendChild(document.createTextNode(
+        `  —  ${m.ext ? m.ext.toUpperCase() : 'unknown kind'}, ${Math.max(1, Math.round(m.size / 1024))} KB`));
+      mList.appendChild(li);
+    });
+  } else {
+    mBlock.classList.add('hidden');
+  }
+
+  document.getElementById('import-confirm').checked = false;
+  document.getElementById('do-import-save').disabled = true;
+}
+
+document.getElementById('import-confirm').onchange = e => {
+  document.getElementById('do-import-save').disabled = !e.target.checked;
+};
+
+document.getElementById('import-preview-back').onclick = async () => {
+  try { await api('/api/import/cancel', {}); } catch (e) { /* nothing was written */ }
+  show('step-import');
+};
+
+document.getElementById('do-import-save').onclick = async () => {
+  document.getElementById('do-import-save').disabled = true;
+  show('step-working');
+  document.getElementById('working-note').textContent = 'Saving…';
+  try {
+    const r = await api('/api/import/save', {});
+    W.saved = r;
+    renderImportDone(r);
+    show('step-import-done');
+  } catch (e) {
+    fail(e.message);
+    show('step-import-preview');
+    document.getElementById('import-confirm').checked = false;
+  }
+};
+
+function renderImportDone(r) {
+  const box = document.getElementById('import-done-summary');
+  box.innerHTML = '';
+  const list = el('ul', 'summary-list');
+  list.appendChild(el('li', '', `Your new chapter is ${r.chapter}`));
+  if (r.media) list.appendChild(el('li', '', `Its pictures are in ${r.media}`));
+  list.appendChild(el('li', '',
+    'Your Word document has not been changed or moved. It is still where it was.'));
+  box.appendChild(list);
+  box.appendChild(el('p', '',
+    'If Obsidian is open, the new chapter appears in it on its own.'));
+}
+
+document.getElementById('import-another').onclick = () => {
+  W.docx = null;                  // the folder is kept: it is usually the same one
+  document.getElementById('import-name').value = '';
+  renderImportStep();
+  show('step-import');
+};
+
+document.getElementById('import-finish').onclick = () => show('step-choose');
+
+/* Straight from the new chapter into the three analyses, so it arrives linked
+   rather than raw. This is the same path as choosing it from the front screen. */
+document.getElementById('import-analyse').onclick = async () => {
+  if (!W.saved) return show('step-choose');
+  show('step-working');
+  document.getElementById('working-note').textContent = 'Opening your new chapter…';
+  try {
+    await openTarget(W.saved.chapter);
+  } catch (e) {
+    fail(e.message);
+    show('step-import-done');
+  }
+};
+
 /* ---------- settings ---------- */
 
 let ENV = {};
@@ -486,9 +718,12 @@ function renderSettings() {
   list.innerHTML = '';
   const rows = [
     ['Version', ENV.version || 'unknown'],
-    ['pandoc', ENV.pandoc
-      ? 'installed — not needed by this tool, but handy if you also export to Word or PDF'
-      : 'not installed — that is fine, this tool does not need it'],
+    ['Reading Word documents', ENV.pandoc
+      ? (ENV.pandoc_where === 'bundled'
+          ? `ready — a copy of pandoc ${ENV.pandoc_version || ''} comes with this app`.trim()
+          : `ready — using the pandoc ${ENV.pandoc_version || ''} already on this Mac`.trim())
+      : 'not set up — the rest of the tool works as normal; you are offered the '
+        + 'one-off install when you first bring in a Word document'],
     ['Obsidian', ENV.obsidian_running ? 'open right now' : 'not open'],
     ['Files kept in', ENV.support_dir || ''],
   ];

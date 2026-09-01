@@ -16,7 +16,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import config, console, github, keychain, llm, picker
+from . import config, console, convert, github, keychain, llm, picker
 from .session import Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -165,12 +165,15 @@ class Handler(BaseHTTPRequestHandler):
 def r_env(handler, data):
     """What the first screen and the settings panel need to know.
 
-    Nothing here can stop the tool working. The three analyses need no outside
-    program at all, so this is information, never a prerequisite check.
+    Nothing here can stop the three analyses working: they need no outside
+    program at all. pandoc is needed only to bring a Word document in, and the
+    interface says so rather than treating it as a prerequisite for everything.
     """
-    import shutil
+    pandoc = convert.status()
     return {
-        "pandoc": bool(shutil.which("pandoc")),
+        "pandoc": pandoc["ready"],
+        "pandoc_where": pandoc["where"],
+        "pandoc_version": pandoc["version"],
         "deepseek": llm.have_key(),
         "deepseek_hint": llm.key_hint(),
         "obsidian_running": picker.obsidian_running(),
@@ -268,7 +271,9 @@ def r_prepare(handler, data):
     if not chapter or not os.path.isfile(chapter):
         raise KeyError("That chapter could not be found. Please start again.")
     session.load_chapter(chapter)
-    warnings, blockers, wrapped = session.preflight()
+    warnings, blockers, wrapped = session.preflight(
+        we_just_wrote_it=(chapter == IMPORT.get("last_saved"))
+    )
     from .terms import discover_concept_pages
     pages, source = discover_concept_pages(session.root, chapter)
     return {
@@ -326,6 +331,152 @@ def r_savekey(handler, data):
     where = llm.save_key(key)
     return {"saved": True, "where": where, "hint": llm.key_hint(),
             "deepseek": llm.have_key()}
+
+
+# --- bringing a Word document in ---------------------------------------------
+#
+# One import at a time, held here rather than in a Session, because it has no
+# chapter and no vault yet - it is a file on the author's desk that is on its
+# way to becoming one. Everything is converted into a temporary folder first;
+# the vault is not touched until r_import_save.
+
+IMPORT = {
+    "docx": None,        # the Word document chosen
+    "folder": None,      # where in the vault it is going
+    "result": None,      # what convert.convert() produced, staged in /tmp
+    "last_saved": None,  # the chapter just written, so the checks do not warn
+                         # the author that "something else" has just saved it
+}
+
+
+def _forget_import():
+    convert.discard(IMPORT.get("result"))
+    IMPORT["result"] = None
+
+
+def r_import_status(handler, data):
+    """Whether this Mac can read Word documents at all."""
+    st = convert.status()
+    st["docx"] = IMPORT["docx"]
+    st["docx_name"] = os.path.basename(IMPORT["docx"]) if IMPORT["docx"] else None
+    st["folder"] = IMPORT["folder"]
+    st["folder_name"] = (os.path.basename(IMPORT["folder"])
+                         if IMPORT["folder"] else None)
+    return st
+
+
+def r_import_install(handler, data):
+    """Fetch pandoc's own signed installer and hand it to Apple's installer.
+
+    The author answers the installer's questions and comes back. They are never
+    asked to type a command, here or anywhere else.
+    """
+    ok, message = convert.download_installer()
+    if not ok:
+        raise KeyError(message)
+    return {"started": True, "message": message}
+
+
+def r_import_pick_docx(handler, data):
+    start = os.path.expanduser("~/Documents")
+    if not os.path.isdir(start):
+        start = os.path.expanduser("~")
+    path, err = picker.choose_word_document(
+        "Choose the Word document you want to bring in", start
+    )
+    if err:
+        return {"error": err}
+    if not path:
+        return {"cancelled": True}
+    if not path.lower().endswith(".docx"):
+        raise KeyError(
+            "That is not a Word document. It needs to be a .docx file - the kind "
+            "Word has saved since 2007. If yours is an older .doc, open it in "
+            "Word and use File, then Save As, to save it as a .docx first."
+        )
+    _forget_import()
+    IMPORT["docx"] = path
+    return {"docx": path,
+            "docx_name": os.path.basename(path),
+            "suggested_name": convert.suggest_name(path),
+            "size": os.path.getsize(path)}
+
+
+def r_import_pick_folder(handler, data):
+    start = IMPORT["folder"] or CONSOLE["root"] or os.path.expanduser("~")
+    path, err = picker.choose_folder(
+        "Choose where in your vault the converted chapter should go", start
+    )
+    if err:
+        return {"error": err}
+    if not path:
+        return {"cancelled": True}
+    folder = path.rstrip("/")
+    IMPORT["folder"] = folder
+    return {"folder": folder,
+            "folder_name": os.path.basename(folder) or folder,
+            "chapters_here": sum(1 for n in os.listdir(folder)
+                                 if n.lower().endswith((".md", ".markdown")))}
+
+
+def r_import_convert(handler, data):
+    """Convert into a temporary folder and say what came out. Writes nothing."""
+    if not IMPORT["docx"]:
+        raise KeyError("Please choose a Word document first.")
+    if not IMPORT["folder"]:
+        raise KeyError("Please choose where the chapter should go first.")
+
+    name = (data.get("name") or "").strip()
+    if not name:
+        raise KeyError("Please give the chapter a name.")
+    if not name.lower().endswith((".md", ".markdown")):
+        name += ".md"
+
+    problem = convert.destination_problem(IMPORT["folder"], name)
+    if problem:
+        raise KeyError(problem)
+
+    _forget_import()
+    try:
+        result = convert.convert(IMPORT["docx"], name)
+    except convert.ConversionFailed as e:
+        raise KeyError(str(e))
+    IMPORT["result"] = result
+
+    found = convert.report(result)
+    return {
+        "name": name,
+        "path": os.path.join(IMPORT["folder"], name),
+        "text": result["text"],
+        "media_dir": result["media_dir"],
+        "media": result["media"],
+        "notes": found["notes"],
+        "counts": found["counts"],
+        "folder": IMPORT["folder"],
+    }
+
+
+def r_import_save(handler, data):
+    """Write the converted chapter, and its pictures, into the vault."""
+    result = IMPORT.get("result")
+    if not result:
+        raise KeyError("There is nothing converted to save. Please start again.")
+
+    chapter_path, media_path = convert.save(result, IMPORT["folder"])
+    _forget_import()
+    IMPORT["last_saved"] = chapter_path
+    return {
+        "chapter": chapter_path,
+        "chapter_name": os.path.basename(chapter_path),
+        "media": media_path,
+        "media_name": os.path.basename(media_path) if media_path else None,
+        "folder": IMPORT["folder"],
+    }
+
+
+def r_import_cancel(handler, data):
+    _forget_import()
+    return {"ok": True}
 
 
 def r_quit(handler, data):
@@ -641,6 +792,14 @@ ROUTES = {
     "/api/save-key": r_savekey,
     "/api/quit": r_quit,
 
+    "/api/import/status": r_import_status,
+    "/api/import/install": r_import_install,
+    "/api/import/pick-docx": r_import_pick_docx,
+    "/api/import/pick-folder": r_import_pick_folder,
+    "/api/import/convert": r_import_convert,
+    "/api/import/save": r_import_save,
+    "/api/import/cancel": r_import_cancel,
+
     "/api/console/status": r_console_status,
     "/api/console/save-client": r_console_save_client,
     "/api/console/signin-start": r_console_signin_start,
@@ -711,6 +870,7 @@ def main(argv=None):
         pass
     finally:
         config.clear_runtime()
+        _forget_import()   # a conversion abandoned half way leaves nothing behind
     httpd.shutdown()
     print("Authoring Assistant stopped.")
     return 0
