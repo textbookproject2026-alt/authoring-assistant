@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authoring Assistant</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-token="__TOKEN__">
+
+<header>
+  <div class="titles">
+    <h1>Authoring Assistant</h1>
+    <p class="sub">Your chapters, and what is waiting for you</p>
+  </div>
+  <div class="toolbar">
+    <nav class="places">
+      <button class="place active" id="go-chapters">Chapters</button>
+      <button class="place" id="go-console">Waiting for you<span class="pill hidden" id="waiting-count"></span></button>
+    </nav>
+    <button class="link" id="open-settings">Settings</button>
+    <button class="link" id="quit-app">Quit</button>
+  </div>
+</header>
+
+<main>
+
+<!-- 0. first run only -->
+<section id="step-welcome" class="step hidden">
+  <h2>Welcome</h2>
+  <p>This tool reads one chapter at a time and asks you, one question at a time,
+  whether to link a citation, link a concept page, or add a term to your glossary.
+  It shows you everything before it saves anything.</p>
+  <p>There is nothing to install and nothing to set up. Everything happens on this
+  Mac.</p>
+
+  <div class="card">
+    <p class="card-label">Optional</p>
+    <p>If you have a <strong>DeepSeek</strong> account, the tool can also ask it
+    for extra glossary suggestions. You do not need one — the ordinary checks work
+    on their own, and if DeepSeek is ever unavailable the tool simply carries on
+    without it.</p>
+    <p class="quiet">You can add a key now, or at any time, from
+    <strong>Settings</strong> in the top corner.</p>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="welcome-go">Get started</button>
+    <button class="link" id="welcome-settings">Add a DeepSeek key first</button>
+  </div>
+</section>
+
+<!-- 1. choose what to work on -->
+<section id="step-choose" class="step">
+  <h2>What would you like to work on?</h2>
+  <p>Choose a single chapter, or the folder that holds all your chapters.</p>
+  <div class="choices">
+    <button class="big" id="pick-file">
+      <strong>One chapter</strong>
+      <span>Pick a single .md file</span>
+    </button>
+    <button class="big" id="pick-folder">
+      <strong>My whole vault</strong>
+      <span>Pick the folder, then choose a chapter</span>
+    </button>
+  </div>
+  <p class="note" id="choose-note"></p>
+  <p class="quiet">You will be asked again each time you run the tool. Nothing is
+  remembered between runs.</p>
+</section>
+
+<!-- 2. choose a chapter from the vault -->
+<section id="step-chapter" class="step hidden">
+  <h2>Which chapter?</h2>
+  <p id="vault-summary" class="quiet"></p>
+  <input type="search" id="chapter-filter" placeholder="Type part of a chapter name to narrow the list">
+  <ul id="chapter-list" class="chapter-list"></ul>
+  <div class="actions"><button class="link" data-back="step-choose">Go back</button></div>
+</section>
+
+<!-- 3. checks and options -->
+<section id="step-options" class="step hidden">
+  <h2>Before we start</h2>
+  <div id="preflight"></div>
+
+  <h3>What should I look for?</h3>
+  <label class="check"><input type="checkbox" id="opt-references" checked>
+    <span><strong>Citations</strong> — find mentions such as “(Bhaskar, 1975)” and
+    link them to the matching entry in your reference list.</span></label>
+  <label class="check"><input type="checkbox" id="opt-terms" checked>
+    <span><strong>Concept pages</strong> — find where the chapter mentions one of
+    your concept pages and link to it.</span></label>
+  <label class="check"><input type="checkbox" id="opt-glossary" checked>
+    <span><strong>Glossary terms</strong> — find terms worth adding to your
+    glossary.</span></label>
+
+  <details>
+    <summary>A few more choices</summary>
+    <label class="check"><input type="checkbox" id="opt-first" checked>
+      <span>Only offer the <strong>first</strong> mention of each concept in the
+      chapter. If you say “yes to all” for a term, every mention is linked
+      anyway.</span></label>
+    <label class="check" id="deepseek-row"><input type="checkbox" id="opt-deepseek">
+      <span>Also ask DeepSeek for glossary suggestions.
+      <em id="deepseek-state"></em></span></label>
+    <div class="field">
+      <span>How should citation links work?</span>
+      <label class="radio"><input type="radio" name="anchor" value="obsidian" checked>
+        Obsidian (recommended)</label>
+      <label class="radio"><input type="radio" name="anchor" value="html">
+        Plain web anchors, for exporting with pandoc</label>
+    </div>
+  </details>
+
+  <div class="actions">
+    <button class="primary" id="start-analysis">Look through this chapter</button>
+    <button class="link" data-back="step-choose">Start over</button>
+  </div>
+</section>
+
+<!-- 4. working -->
+<section id="step-working" class="step hidden">
+  <h2>Reading your chapter…</h2>
+  <p class="quiet" id="working-note">This usually takes a moment.</p>
+  <div class="spinner"></div>
+</section>
+
+<!-- 5. one finding at a time -->
+<section id="step-review" class="step hidden">
+  <div class="progress-row">
+    <span id="progress-label">1 of 1</span>
+    <div class="bar"><div id="progress-bar"></div></div>
+  </div>
+
+  <h2 id="finding-title">…</h2>
+  <p id="finding-explain" class="explain"></p>
+
+  <div class="card">
+    <p class="card-label">In your chapter, line <span id="finding-line"></span></p>
+    <p class="sentence" id="sentence-before"></p>
+  </div>
+
+  <div class="card after" id="after-card">
+    <p class="card-label">After the change</p>
+    <p class="sentence" id="sentence-after"></p>
+  </div>
+
+  <div class="card detail" id="detail-card">
+    <p class="card-label" id="detail-label"></p>
+    <p id="detail-text"></p>
+  </div>
+
+  <div class="answers">
+    <button class="yes" id="ans-yes">Yes, make this change</button>
+    <button class="no" id="ans-no">No, leave it alone</button>
+  </div>
+  <div class="answers secondary">
+    <button id="ans-yes-all">Yes to every mention of <span class="grp"></span></button>
+    <button id="ans-no-all">No to every mention of <span class="grp"></span></button>
+  </div>
+  <div class="actions">
+    <button class="link" id="ans-back">Go back one</button>
+    <button class="link" id="ans-stop">Stop here and see what I have chosen</button>
+  </div>
+</section>
+
+<!-- 6. preview -->
+<section id="step-preview" class="step hidden">
+  <h2>Here is exactly what will change</h2>
+  <p id="preview-summary"></p>
+
+  <div id="nothing-chosen" class="hidden">
+    <p class="notice" id="nothing-text">You did not choose any changes, so there is
+    nothing to save.</p>
+  </div>
+
+  <div id="notes-block" class="hidden">
+    <h3>Also worth knowing</h3>
+    <ul class="summary-list" id="notes-list"></ul>
+  </div>
+
+  <div id="preview-body">
+    <h3>Your chapter</h3>
+    <p class="quiet" id="preview-file"></p>
+    <div class="tabs">
+      <button class="tab active" data-tab="changes">Just the changed lines</button>
+      <button class="tab" data-tab="whole">The whole chapter as it will be</button>
+    </div>
+    <div id="tab-changes" class="tabbody"></div>
+    <div id="tab-whole" class="tabbody hidden"><pre id="whole-file"></pre></div>
+
+    <div id="glossary-block">
+      <h3>Your glossary</h3>
+      <p class="quiet" id="glossary-file"></p>
+      <div id="glossary-preview"></div>
+    </div>
+  </div>
+
+  <div class="warnbox">
+    <h3>Please read this before you continue</h3>
+    <p>When you press the button below, these changes are written straight into
+    your files, replacing what is there now.</p>
+    <p><strong>There is no undo.</strong> The tool cannot put your chapter back
+    the way it was. If you are not certain, press “Go back” and look again, or
+    make a copy of the file in Finder first.</p>
+    <label class="check confirm"><input type="checkbox" id="confirm-box">
+      <span>I have read the changes above and I want to save them.</span></label>
+  </div>
+
+  <div class="actions">
+    <button class="primary danger" id="do-commit" disabled>Save these changes</button>
+    <button class="link" id="preview-back">Go back to the questions</button>
+  </div>
+</section>
+
+<!-- 7. done -->
+<section id="step-done" class="step hidden">
+  <h2>Saved</h2>
+  <div id="done-summary"></div>
+  <div class="actions">
+    <button class="primary" id="again">Work on another chapter</button>
+    <button class="link" id="finish">Finish and close the tool</button>
+  </div>
+</section>
+
+<section id="step-stopped" class="step hidden">
+  <h2>The tool has stopped</h2>
+  <p>You can close this browser tab, and close the black Terminal window if it is
+  still open.</p>
+</section>
+
+<!-- ============ the console ============ -->
+
+<!-- C0. not set up yet -->
+<section id="step-console-setup" class="step hidden">
+  <h2>Waiting for you</h2>
+  <p>This half of the tool shows what readers and contributors have sent you, so
+  you can deal with it here rather than on a website.</p>
+  <div class="card">
+    <p class="card-label">One-off setup</p>
+    <p>Before it can be used, Alec needs to put a sign-in identifier into
+    <strong>Settings</strong>. It is a short piece of text he will give you, and
+    it only has to be done once on this Mac.</p>
+  </div>
+  <div class="actions">
+    <button class="primary" id="setup-open-settings">Open Settings</button>
+    <button class="link" id="setup-back">Back to my chapters</button>
+  </div>
+</section>
+
+<!-- C1. signed out -->
+<section id="step-console-signin" class="step hidden">
+  <h2>Sign in</h2>
+  <p>Signing in lets the tool show you what is waiting and act on your behalf.
+  You sign in <strong>as yourself</strong>, so anything you accept or decline is
+  recorded under your own name, and you can withdraw the tool's access at any
+  time.</p>
+  <p class="quiet">You only do this once. Your sign-in is kept in this Mac's
+  Keychain, never in a file.</p>
+
+  <div id="signin-code-box" class="card hidden">
+    <p class="card-label">Step 1 — copy this code</p>
+    <p class="bigcode" id="signin-code">····-····</p>
+    <p class="card-label">Step 2 — a web page has opened. Type the code there and
+    approve.</p>
+    <p class="quiet" id="signin-url"></p>
+    <p class="quiet" id="signin-waiting">Waiting for you to approve…</p>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="signin-start">Sign in</button>
+    <button class="link" id="signin-back">Back to my chapters</button>
+  </div>
+</section>
+
+<!-- C2. the list -->
+<section id="step-console" class="step hidden">
+  <h2>Waiting for you</h2>
+  <p class="quiet" id="console-who"></p>
+
+  <div id="console-problems" class="hidden"></div>
+
+  <div id="console-empty" class="hidden">
+    <p class="notice ok">Nothing is waiting. Everything sent in has been dealt
+    with.</p>
+  </div>
+
+  <div id="suggestions-block">
+    <h3>Suggestions from readers <span class="count" id="suggestions-count"></span></h3>
+    <p class="quiet">Sent from the “Suggest an edit” button on the website. No
+    account needed at their end, so these come from ordinary readers.</p>
+    <ul class="queue" id="suggestions-list"></ul>
+  </div>
+
+  <div id="drafts-block">
+    <h3>Draft changes <span class="count" id="drafts-count"></span></h3>
+    <p class="quiet">Written by trusted contributors in the browser editor.
+    Nothing here has reached readers — accepting puts it in the drafts area, and
+    it goes live when you next publish from Obsidian.</p>
+    <ul class="queue" id="drafts-list"></ul>
+  </div>
+
+  <h3>The weekly jobs</h3>
+  <ul class="summary-list" id="weekly-list"></ul>
+
+  <h3>Elsewhere</h3>
+  <ul class="summary-list">
+    <li><strong>Reader discussion</strong> — every comment left in the margins of
+      the book.
+      <a id="link-discussion" href="#" target="_blank" rel="noopener">Open the
+      discussion list</a></li>
+    <li><strong>History</strong> — what changed, when, and by whom, plus each
+      year's published edition.
+      <a id="link-history" href="#" target="_blank" rel="noopener">Open the
+      history</a></li>
+  </ul>
+
+  <div class="actions">
+    <button id="console-refresh">Check again</button>
+    <button class="link" id="console-vault"></button>
+    <button class="link" id="console-signout">Sign out</button>
+  </div>
+</section>
+
+<!-- C3. one suggestion -->
+<section id="step-suggestion" class="step hidden">
+  <h2>A suggestion from a reader</h2>
+  <p class="quiet" id="sug-meta"></p>
+
+  <div class="card">
+    <p class="card-label">What they said</p>
+    <p class="sentence" id="sug-text"></p>
+  </div>
+
+  <div class="card detail hidden" id="sug-reason-card">
+    <p class="card-label">Why they suggested it</p>
+    <p id="sug-reason"></p>
+  </div>
+
+  <div id="sug-plan"></div>
+
+  <div class="actions">
+    <button class="yes" id="sug-accept">Accept</button>
+    <button class="no" id="sug-decline">Decline, politely</button>
+    <button class="link" id="sug-browser">Open in my browser</button>
+    <button class="link" id="sug-back">Back to the list</button>
+  </div>
+</section>
+
+<!-- C4. one draft change -->
+<section id="step-draft" class="step hidden">
+  <h2>A draft change</h2>
+  <p class="quiet" id="draft-meta"></p>
+  <div id="draft-body"><div class="spinner"></div></div>
+
+  <div class="actions">
+    <button class="yes" id="draft-accept">Accept this change</button>
+    <button class="no" id="draft-decline">Decline it</button>
+    <button class="link" id="draft-browser">Open in my browser</button>
+    <button class="link" id="draft-back">Back to the list</button>
+  </div>
+</section>
+
+<!-- C5. what just happened -->
+<section id="step-console-done" class="step hidden">
+  <h2 id="cdone-title">Done</h2>
+  <ul class="summary-list" id="cdone-steps"></ul>
+  <div class="actions">
+    <button class="primary" id="cdone-back">Back to what is waiting</button>
+  </div>
+</section>
+
+</main>
+
+<div id="settings" class="hidden">
+  <div class="panel">
+    <h2>Settings</h2>
+
+    <h3>DeepSeek (optional)</h3>
+    <p class="quiet">The tool finds glossary terms perfectly well without this.
+    A key simply lets it ask DeepSeek for extra suggestions as well.</p>
+
+    <div id="key-present" class="hidden">
+      <p class="notice ok">A key is saved on this Mac, ending
+      <strong id="key-hint"></strong>.</p>
+    </div>
+
+    <label class="field-label" for="key-input">Paste a key to save it</label>
+    <input type="password" id="key-input" placeholder="Your DeepSeek key"
+           autocomplete="off" spellcheck="false">
+    <div class="actions tight">
+      <button class="primary" id="key-save">Save key</button>
+      <button id="key-test">Check it works</button>
+      <button class="link" id="key-clear">Remove the saved key</button>
+    </div>
+    <p id="key-message" class="quiet"></p>
+    <p class="quiet">The key is kept in <span id="key-file">this Mac's
+    Keychain</span>, not in a file. It is never put in your vault, and the only
+    thing ever sent to DeepSeek is the chapter you are working on.</p>
+
+    <h3>Signing in to see what is waiting</h3>
+    <p class="quiet">This is the one-off identifier Alec gives you. It is not a
+    password and not a secret — it simply tells the sign-in page which
+    application is asking.</p>
+    <div id="client-present" class="hidden">
+      <p class="notice ok">An identifier is saved, beginning
+      <strong id="client-hint"></strong>.</p>
+    </div>
+    <label class="field-label" for="client-input">Sign-in identifier</label>
+    <input type="text" id="client-input" placeholder="Paste the identifier here"
+           autocomplete="off" spellcheck="false">
+    <div class="actions tight">
+      <button class="primary" id="client-save">Save identifier</button>
+    </div>
+    <p id="client-message" class="quiet"></p>
+
+    <h3>About this Mac</h3>
+    <ul class="summary-list" id="env-list"></ul>
+
+    <div class="actions">
+      <button class="primary" id="settings-close">Done</button>
+    </div>
+  </div>
+</div>
+
+<div id="error" class="hidden">
+  <div class="errbox">
+    <h3>Something needs your attention</h3>
+    <p id="error-text"></p>
+    <button id="error-ok">All right</button>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

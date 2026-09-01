@@ -1,0 +1,17 @@
+# Never commit an API key.
+*.key
+deepseek.key
+.authoring-assistant/
+
+# Python leftovers
+__pycache__/
+*.pyc
+
+# Temporary files the tool writes while saving
+.*.aa-tmp
+
+.DS_Store
+
+# Build output
+build/
+dist/
