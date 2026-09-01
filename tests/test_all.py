@@ -493,6 +493,90 @@ check("the GitHub sign-in and the DeepSeek key use one store, not two",
 
 
 
+
+# ---------------------------------------------------------------------------
+# The words the troubleshooting guide quotes.
+#
+# The vault repo's docs/troubleshooting.md walks the author through this screen
+# by quoting it: button labels, screen names and error messages, word for word.
+# Rename one of them here and that entry starts telling people to press a button
+# that no longer exists, which is exactly the drift nobody notices. So the
+# rename has to fail here first, and this test names the file to go and fix.
+# ---------------------------------------------------------------------------
+
+DOC_ENTRY = ('../Obsidian Vault/docs/troubleshooting.md — "The author\'s console '
+             'won\'t sign in, or shows nothing waiting"')
+
+# path -> the exact strings that entry depends on. Button labels carry their
+# closing tag so that renaming the button, and not merely some prose that
+# happens to repeat the words, is what breaks the check.
+QUOTED_BY_THE_GUIDE = {
+    "app/web/index.html": [
+        ">Chapters</button>",
+        "Waiting for you",
+        "<h2>Sign in</h2>",
+        ">Sign in</button>",
+        "One-off setup",
+        ">Open Settings</button>",
+        ">Save identifier</button>",
+        ">Check again</button>",
+        ">All right</button>",
+        "Signing in to see what is waiting",
+        ">Sign-in identifier</label>",
+        "Step 1 — copy this code",
+        "Step 2 — a web page has opened. Type the code there and approve.",
+        "Something needs your attention",
+        "Nothing is waiting. Everything sent in has been dealt with.",
+        "Suggestions from readers",
+        "Draft changes",
+        "Sent from the “Suggest an edit” button on the website.",
+        "Written by trusted contributors in the browser editor.",
+        "Elsewhere",
+        "Open the discussion list",
+    ],
+    "app/web/app.js": [
+        "Waiting for you to approve… this code lasts about ",
+        "If the page did not open, go to ",
+        "Signed in as ",
+        "(none)",
+        'Saved. You can now sign in from "Waiting for you".',
+        "This Mac is not online, so this list may be incomplete. Nothing can be "
+        "accepted or declined until it is back.",
+    ],
+    "app/github.py": [
+        "https://github.com/login/device",
+        "This copy has not been set up for signing in yet. Ask Alec to add",
+        "Signing in could not be started. Check the sign-in identifier in",
+        "The sign-in identifier in Settings is not recognised. Ask Alec to",
+        "Sign-in was refused on the web page. Nothing was changed.",
+        "This Mac is not online, so signing in cannot start.",
+        "Your sign-in is no longer accepted. Please sign in again.",
+        "Your sign-in does not have permission to do that. Signing in again",
+    ],
+    "app/server.py": [
+        "That code ran out before it was used. Please start again.",
+        "Signing in worked, but the token could not be stored in this Mac's",
+        "Suggestions: ",
+        "Draft changes: ",
+        "Weekly jobs: ",
+    ],
+}
+
+_here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_gone = []
+for _relpath, _strings in QUOTED_BY_THE_GUIDE.items():
+    with open(os.path.join(_here, *_relpath.split("/")), encoding="utf-8") as fh:
+        # Flattened, because the source wraps these across lines and the guide
+        # quotes them as the author reads them: as one sentence.
+        _source = " ".join(fh.read().split())
+    for _quoted in _strings:
+        if " ".join(_quoted.split()) not in _source:
+            _gone.append(f"{_relpath}: {_quoted!r}")
+
+check("every word the troubleshooting guide quotes is still in the app",
+      not _gone,
+      "no longer in the app — update " + DOC_ENTRY + "\n         "
+      + "\n         ".join(_gone))
 shutil.rmtree(_vault, ignore_errors=True)
 
 shutil.rmtree(root, ignore_errors=True)

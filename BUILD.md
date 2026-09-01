@@ -266,8 +266,9 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 86 checks: the analyses, the file-safety promises,
-                              #            and the console's refusal rules
+python3 -m tests.test_all     # 87 checks: the analyses, the file-safety promises,
+                              #            the console's refusal rules, and the
+                              #            words the troubleshooting guide quotes
 node tests/ui_flow.js         # 27 checks: the review flow, driven against real app.js
 ```
 
