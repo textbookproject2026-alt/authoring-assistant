@@ -78,7 +78,11 @@ def hard_wrapped_paragraphs(docmap):
             docmap.is_prose_line(i)
             and not docmap.in_references(i)
             and not re.match(r"^\s*([-*+]|\d+[.)])\s", line)
-            and not line.lstrip().startswith((">", "|", "    "))
+            # "<" catches blocks of raw HTML. A chapter that came out of Word
+            # carries them wherever markdown had no equivalent - a picture with
+            # a caption, a table with merged cells - and each is several lines
+            # of markup, not a paragraph somebody wrapped by hand.
+            and not line.lstrip().startswith((">", "|", "<", "    "))
         )
         if plain:
             current.append(i)
@@ -138,7 +142,14 @@ class Session:
 
     # -- checks before we touch anything --------------------------------------
 
-    def preflight(self):
+    def preflight(self, we_just_wrote_it=False):
+        """Checks before we touch anything.
+
+        `we_just_wrote_it` is set when the chapter has this moment come out of a
+        Word document, through this tool. Without it the freshness check below
+        would accuse the tool of the very thing it has just done, which reads as
+        a warning that something is wrong when nothing is.
+        """
         warnings, blockers = [], []
         path = self.chapter_path
 
@@ -149,7 +160,7 @@ class Session:
             )
 
         age = time.time() - self.read_mtime
-        if age < 20:
+        if age < 20 and not we_just_wrote_it:
             warnings.append(
                 "This chapter was saved by something else a few seconds ago. "
                 "If you were just editing it, make sure you have finished before "

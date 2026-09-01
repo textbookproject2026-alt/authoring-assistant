@@ -7,14 +7,17 @@ they get a signed, notarised `.dmg`.
 
 ## What the build produces
 
-A self-contained `Authoring Assistant.app` with its own copy of Python inside it.
-The author's Mac needs nothing installed: no Python, no Homebrew, no pandoc, no
-Command Line Tools.
+A self-contained `Authoring Assistant.app` with its own copy of Python **and its
+own copy of pandoc** inside it. The author's Mac needs nothing installed: no
+Python, no Homebrew, no pandoc, no Command Line Tools.
 
 - `build/Authoring Assistant.app` — the signed, stapled application
 - `dist/Authoring Assistant <version>.dmg` — signed, notarised, stapled
 
-Roughly 65 MB as an app, 28 MB as a disk image.
+Roughly 255 MB as an app, 70 MB as a disk image. pandoc accounts for almost all
+of that: it is a 190 MB statically linked Haskell binary and there is no smaller
+build of it. `--no-pandoc` produces the old ~65 MB app, at the cost of making the
+author install pandoc themselves the first time they bring in a Word document.
 
 ## Requirements on the build machine
 
@@ -23,7 +26,7 @@ Roughly 65 MB as an app, 28 MB as a disk image.
 | Xcode command line tools | `clang` compiles the launcher; `codesign`, `notarytool`, `stapler` |
 | A Developer ID Application certificate | signing |
 | An App Store Connect key or app-specific password | notarisation |
-| Network access | downloads the relocatable Python at build time |
+| Network access | downloads the relocatable Python and pandoc at build time |
 | Any Python 3 | only to draw the icon during the build |
 
 ## One-time notarisation setup
@@ -56,6 +59,7 @@ Gatekeeper will on the author's Mac.
 ```sh
 ./packaging/build.sh --no-notarize   # build and sign only — fast local check
 ./packaging/build.sh --no-sign       # build only — no certificate needed
+./packaging/build.sh --no-pandoc     # leave pandoc out; see "Word documents"
 ```
 
 ### Settings
@@ -69,6 +73,7 @@ All read from the environment; nothing is hardcoded.
 | `VERSION` | `1.0.0` | shown in the app's Settings panel |
 | `BUILD_NUMBER` | a timestamp | `CFBundleVersion` |
 | `PYTHON_VERSION` | `3.12` | the interpreter bundled |
+| `PANDOC_VERSION` | the latest release | e.g. `3.11`; pin it to keep builds reproducible |
 | `ARCH` | this machine's | `arm64` or `x86_64` |
 | `NOTARY_PROFILE` | — | keychain profile, the easiest option |
 | `NOTARY_APPLE_ID` / `NOTARY_TEAM_ID` / `NOTARY_PASSWORD` | — | alternative to the profile |
@@ -98,6 +103,7 @@ Authoring Assistant.app/
       app/                         the tool itself
       python/                      a complete relocatable CPython
         bin/AuthoringAssistant     the interpreter, renamed so Activity Monitor reads well
+      pandoc/bin/pandoc            pandoc, for reading Word documents
       AppIcon.icns                 drawn by packaging/make_icon.py
       VERSION
 ```
@@ -153,6 +159,68 @@ There is no menu bar item to quit from, so the server decides for itself:
 `~/Library/Application Support/Authoring Assistant/runtime.json` records the port
 and token of the running copy, so a second launch reconnects instead of starting
 a rival. It is removed on exit, and a stale one is detected and ignored.
+
+### Word documents, and why pandoc is bundled
+
+`app/convert.py` turns a `.docx` into a chapter. It shells out to pandoc with a
+fixed set of flags:
+
+```
+-f docx -t gfm --wrap=none --extract-media=<chapter>-media
+```
+
+**`--wrap=none` is not a preference.** Without it pandoc breaks every paragraph
+at some column width, and the entire tool falls over: `edits.py` replaces a
+stretch of characters on a single line and copies every other line through byte
+for byte, and the vault's line-by-line history is only readable because a changed
+sentence appears as one changed line. Wrapped output would make a one-word fix
+look like a rewritten paragraph in every diff, for ever. The reason is written
+beside the flag in `convert.py`, and `tests/test_all.py` fails if either the flag
+or the explanation goes missing.
+
+`-t gfm` is kept as it is, complex tables and all. Turning off `raw_html` would
+produce prettier image syntax, but it would also silently flatten any table
+pandoc could not express as a pipe table — losing the author's data rather than
+merely making it ugly. Instead the app *reports* what came out; see
+`convert.report`.
+
+**Finding pandoc.** `convert.find_pandoc()` looks in the bundle first, then on
+`PATH`, then in `LIKELY_PANDOC` — `/usr/local/bin`, Homebrew, MacPorts. That last
+list matters: the app is launched from Finder, so it inherits almost no `PATH`
+and `shutil.which` alone would miss a pandoc the author already has. The bundled
+copy wins, so the app always uses the version it was tested against.
+
+**When it is missing.** Only possible from a checkout, or a `--no-pandoc` build.
+The app then offers a guided install: it downloads pandoc's own `.pkg` from
+pandoc's own release page, refuses it unless `pkgutil --check-signature` reports
+a Developer ID Installer certificate, and hands it to `/usr/bin/open` so Apple's
+installer takes over. The package installs to `/usr/local/bin/pandoc`, which is
+the first entry in `LIKELY_PANDOC`, so pressing "Check again" finds it at once.
+
+The author is never told to run `brew`, or to open a terminal, anywhere in this
+path. A test asserts that.
+
+**Signing.** pandoc arrives signed by John MacFarlane, which counts for nothing
+once it is inside our bundle — everything in an app must be signed by the
+identity that signs the app. `build.sh` re-signs it with the hardened runtime and
+**no entitlements**: it reads a file and writes a file, and never loads a library
+of ours. The build also round-trips a real `.docx` through the bundled binary
+before signing, so a broken or wrong-architecture copy is caught on the build
+machine rather than on the author's Mac.
+
+**Nothing is written until the author says so.** `convert.convert()` works in a
+`tempfile.mkdtemp()` staging folder; `convert.save()` is the only thing that
+touches the vault. It refuses to overwrite an existing chapter or an existing
+media folder — there is no undo in this tool — and writes the media folder before
+the chapter, so a chapter never exists in the vault pointing at pictures that
+failed to copy.
+
+**The one rewrite.** pandoc extracts a picture to `<dir>/media/x.png`, keeping the
+path it had inside the `.docx`. `_tidy_media_folder` lifts those up one level and
+fixes the links, but only when the extracted tree is exactly that shape; anything
+else is left as pandoc arranged it, links intact. This breaks no promise: the
+untouched-lines rule is about chapters that already exist, and this file does not
+yet.
 
 ---
 
@@ -266,16 +334,23 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 87 checks: the analyses, the file-safety promises,
-                              #            the console's refusal rules, and the
-                              #            words the troubleshooting guide quotes
-node tests/ui_flow.js         # 27 checks: the review flow, driven against real app.js
+python3 -m tests.test_all     # 143 checks: the analyses, the file-safety promises,
+                              #             the Word conversion, the console's
+                              #             refusal rules, and the words the
+                              #             troubleshooting guide quotes
+node tests/ui_flow.js         # 45 checks: the review and import flows, driven
+                              #            against the real app.js
 ```
 
 The Python suite covers the things that must never break: that untouched lines
 stay byte-for-byte identical, that a second run finds nothing to do, that a file
-changed on disk is refused, and that the glossary merges alphabetically without
-duplicates.
+changed on disk is refused, that the glossary merges alphabetically without
+duplicates, and that the conversion keeps `--wrap=none`, never overwrites, and
+reports what the author has to check.
+
+The conversion checks that need a real `.docx` build one with pandoc and skip
+themselves on a machine that has none; the report checks are driven from text, so
+they always run.
 
 To run the suite against the bundled interpreter rather than the system one:
 
@@ -288,8 +363,13 @@ PYTHONHOME="$APP/python" "$APP/python/bin/AuthoringAssistant" -m tests.test_all
 
 1. Bump `VERSION`.
 2. `export NOTARY_PROFILE=authoring-assistant && ./packaging/build.sh`
-3. Check the final `spctl` output says `accepted` and `Notarized Developer ID`.
-4. Send the author the `.dmg`. Nothing else.
+3. Check the build said a Word document converted correctly.
+4. Check the final `spctl` output says `accepted` and `Notarized Developer ID`.
+5. Send the author the `.dmg`. Nothing else.
+
+Notarising a 255 MB app takes noticeably longer than it used to. The pandoc
+download is cached in `build/cache`, so only the first build of a given version
+pays for it.
 
 ## Never commit
 
