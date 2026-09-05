@@ -1048,7 +1048,7 @@ def _converter_notes(result):
         "not written for you: " + "  ·  ".join(w.strip() for w in warnings),
         "Compare the chapter below against the Word document, looking for "
         "anything that is missing. If you cannot see what it means, send this "
-        "wording to Alec.")]
+        "wording to the technical contact.")]
 
 
 def _shape_notes(text, lines):
@@ -1073,8 +1073,8 @@ def _shape_notes(text, lines):
             "suggests they have been split across several lines. The tool still "
             "works, but your vault's history would then show a whole paragraph "
             "as changed whenever a single word is corrected.",
-            "Tell Alec if you see this — it means something about the conversion "
-            "needs looking at.")]
+            "Tell the technical contact if you see this — it means something "
+            "about the conversion needs looking at.")]
     return [_note(
         "ok", "Each paragraph is on a single line",
         "This is what the rest of the tool expects, and it is what keeps your "

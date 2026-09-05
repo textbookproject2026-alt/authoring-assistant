@@ -1167,9 +1167,14 @@ QUOTED_BY_THE_GUIDE = {
     ],
     "app/github.py": [
         "https://github.com/login/device",
-        "This copy has not been set up for signing in yet. Ask Alec to add",
+        # Listed in the two pieces the source wraps them into: the flattening
+        # below joins the lines but leaves the quotes that join the literals,
+        # so a string may not span the seam between them.
+        "This copy has not been set up for signing in yet. Ask the",
+        "technical contact to add the sign-in identifier in Settings.",
         "Signing in could not be started. Check the sign-in identifier in",
-        "The sign-in identifier in Settings is not recognised. Ask Alec to",
+        "The sign-in identifier in Settings is not recognised. Ask the",
+        "technical contact to check it.",
         "Sign-in was refused on the web page. Nothing was changed.",
         "This Mac is not online, so signing in cannot start.",
         "Your sign-in is no longer accepted. Please sign in again.",

@@ -251,7 +251,7 @@ and this file does not yet.
 
 ## One-time sign-in setup (must be done by hand)
 
-The console half signs the author in to GitHub **as himself**, using the OAuth
+The console half signs the author in to GitHub **as themselves**, using the OAuth
 **device flow**. Nothing about this ships as a secret, and the app hosts no
 callback address, so there is nothing to deploy and nothing to keep running.
 
@@ -280,7 +280,7 @@ At <https://github.com/settings/developers> → **New OAuth App**:
 
 | Field | Value |
 |---|---|
-| Application name | `Textbook Author Console` — the author sees this name when approving, and again in his authorised-apps list, so it must be recognisable |
+| Application name | `Textbook Author Console` — the author sees this name when approving, and again in their list of authorised apps, so it must be recognisable |
 | Homepage URL | `https://bptext2026.xyz` |
 | Authorization callback URL | `https://bptext2026.xyz` (required by the form; device flow never uses it) |
 | Enable Device Flow | **ticked** — without this, sign-in fails with `incorrect_client_credentials` |
@@ -295,8 +295,8 @@ Open the app → **Settings** → **Signing in to see what is waiting** → past
 Client ID → **Save identifier**. It is stored in `state.json` under Application
 Support (not a secret, so not in the Keychain). Done once per Mac.
 
-Until it is set, the console shows a plain "Alec needs to set this up" screen
-rather than failing.
+Until it is set, the console shows a plain "the technical contact needs to set
+this up" screen rather than failing.
 
 ### The scope, and why it is narrow
 
@@ -355,10 +355,10 @@ shared: it carries whatever has been written in the Sveltia CMS as well as
 whatever the console has accepted, so merging on the strength of one press about
 one change would publish other people's unreviewed work. `main` is protected and
 has checks of its own, which a desktop app is in no position to wait for. And the
-author's vault tracks `main`, so writing there behind his back would leave his own
-copy silently out of date and set up the next conflict. Publishing is therefore
-its own screen, showing what would go, with a box to tick — and it says
-afterwards that the vault now needs pulling.
+author's vault tracks `main`, so writing there behind the author's back would
+leave that copy silently out of date and set up the next conflict. Publishing
+is therefore its own screen, showing what would go, with a box to tick — and it
+says afterwards that the vault now needs pulling.
 
 There is exactly one publish request at a time and its description is **rewritten**
 on each accept, never appended to, because what it carries is `drafts` as it

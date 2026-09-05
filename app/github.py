@@ -118,7 +118,7 @@ def _http_problem(e):
     if code == 403:
         return Problem(
             "Your sign-in does not have permission to do that. Signing in again "
-            "may fix it; if not, ask Alec.",
+            "may fix it; if not, ask the technical contact.",
             needs_signin=True,
         )
     if code == 404:
@@ -149,8 +149,8 @@ def start_signin(client_id):
     """Ask for a code the author types into a web page."""
     if not client_id:
         return Problem(
-            "This copy has not been set up for signing in yet. Ask Alec to add "
-            "the sign-in identifier in Settings."
+            "This copy has not been set up for signing in yet. Ask the "
+            "technical contact to add the sign-in identifier in Settings."
         )
     result = _form_post(DEVICE_CODE_URL, {"client_id": client_id, "scope": SCOPE})
     if isinstance(result, Problem):
@@ -217,8 +217,8 @@ def poll_signin(client_id, device_code):
         return Problem("Sign-in was refused on the web page. Nothing was changed.")
     if error == "incorrect_client_credentials":
         return Problem(
-            "The sign-in identifier in Settings is not recognised. Ask Alec to "
-            "check it."
+            "The sign-in identifier in Settings is not recognised. Ask the "
+            "technical contact to check it."
         )
     return Problem("Signing in did not complete. Please try again.")
 

@@ -233,8 +233,9 @@ under your own name, and you can withdraw the tool's access at any time from you
 account settings. Your sign-in is kept in this Mac's Keychain — not in a file,
 and never in your vault.
 
-If Alec has not yet put the sign-in identifier into **Settings**, the tool will
-say so and there is nothing you can do until he has. It is a one-off.
+If the technical contact has not yet put the sign-in identifier into
+**Settings**, the tool will say so and there is nothing you can do until they
+have. It is a one-off.
 
 ### Suggestions from readers
 
@@ -319,7 +320,8 @@ press **Check again**.
 
 Underneath is a line for each of the four jobs that run themselves every Sunday,
 saying whether each one last finished properly. There is nothing to do here. If
-one says it did not finish, tell Alec — it is not something you need to fix.
+one says it did not finish, tell the technical contact — it is not something
+you need to fix.
 
 ### Discussion and history
 
@@ -352,8 +354,8 @@ glossary suggestions. You do not need one — the ordinary checks work perfectly
 their own, and if DeepSeek is ever unavailable the tool quietly carries on
 without it and tells you so.
 
-The second is the **sign-in identifier** for "Waiting for you". Alec gives you
-this once; it is not a password and not a secret.
+The second is the **sign-in identifier** for "Waiting for you". The technical
+contact gives you this once; it is not a password and not a secret.
 
 Your DeepSeek key and your sign-in are both stored in this Mac's Keychain, not in
 a file and never in your vault. The only thing ever sent to DeepSeek is the text

@@ -1085,7 +1085,7 @@ function renderConsole() {
     const li = el('li');
     li.appendChild(el('strong', '', w.name + ': '));
     const state = w.state === 'ok' ? 'ran successfully'
-      : w.state === 'failed' ? 'did not finish — worth telling Alec'
+      : w.state === 'failed' ? 'did not finish — worth telling the technical contact'
       : 'has not run yet';
     li.appendChild(document.createTextNode(state + (w.when ? ' (' + when(w.when) + ')' : '')));
     wl.appendChild(li);

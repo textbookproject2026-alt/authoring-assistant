@@ -765,8 +765,8 @@ def r_console_decline(handler, data):
 # well as whatever has been accepted here, so merging it would publish other
 # people's unreviewed work on the strength of one press about one change. The
 # live book is also protected and has checks of its own, and the author's vault
-# tracks it, so writing to it behind his back would leave his own copy silently
-# out of date. Publishing is therefore its own deliberate press, on its own
+# tracks it, so writing to it behind the author's back would leave that copy
+# silently out of date. Publishing is therefore its own deliberate press, on its own
 # screen, showing what would go — the same reasoning that keeps the weekly
 # generated pull requests out of this app.
 
