@@ -412,6 +412,8 @@ def r_import_pick_folder(handler, data):
     if not path:
         return {"cancelled": True}
     folder = path.rstrip("/")
+    if convert.find_vault_root(folder) is None:
+        return {"error": convert.vault_problem(folder)}
     IMPORT["folder"] = folder
     return {"folder": folder,
             "folder_name": os.path.basename(folder) or folder,
@@ -438,7 +440,7 @@ def r_import_convert(handler, data):
 
     _forget_import()
     try:
-        result = convert.convert(IMPORT["docx"], name)
+        result = convert.convert(IMPORT["docx"], name, IMPORT["folder"])
     except convert.ConversionFailed as e:
         raise KeyError(str(e))
     IMPORT["result"] = result
@@ -448,7 +450,7 @@ def r_import_convert(handler, data):
         "name": name,
         "path": os.path.join(IMPORT["folder"], name),
         "text": result["text"],
-        "media_dir": result["media_dir"],
+        "media_rel": result["media_rel"],
         "media": result["media"],
         "notes": found["notes"],
         "counts": found["counts"],
@@ -462,6 +464,7 @@ def r_import_save(handler, data):
     if not result:
         raise KeyError("There is nothing converted to save. Please start again.")
 
+    media_rel = result.get("media_rel")
     chapter_path, media_path = convert.save(result, IMPORT["folder"])
     _forget_import()
     IMPORT["last_saved"] = chapter_path
@@ -469,7 +472,7 @@ def r_import_save(handler, data):
         "chapter": chapter_path,
         "chapter_name": os.path.basename(chapter_path),
         "media": media_path,
-        "media_name": os.path.basename(media_path) if media_path else None,
+        "media_name": media_rel,
         "folder": IMPORT["folder"],
     }
 

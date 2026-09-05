@@ -613,7 +613,7 @@ function renderImportPreview(r) {
   if (r.media.length) {
     mBlock.classList.remove('hidden');
     document.getElementById('import-media-note').textContent =
-      `These will be saved in a folder called “${r.media_dir}”, next to the chapter.`;
+      `These will be saved in your textbook's pictures folder, in a folder of their own — “${r.media_rel}”.`;
     r.media.forEach(m => {
       const li = el('li');
       li.appendChild(el('strong', '', m.name));
@@ -659,7 +659,8 @@ function renderImportDone(r) {
   box.innerHTML = '';
   const list = el('ul', 'summary-list');
   list.appendChild(el('li', '', `Your new chapter is ${r.chapter}`));
-  if (r.media) list.appendChild(el('li', '', `Its pictures are in ${r.media}`));
+  if (r.media) list.appendChild(el('li', '',
+    `Its pictures are in ${r.media_name || r.media}, inside your textbook`));
   list.appendChild(el('li', '',
     'Your Word document has not been changed or moved. It is still where it was.'));
   box.appendChild(list);

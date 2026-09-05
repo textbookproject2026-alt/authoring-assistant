@@ -349,14 +349,22 @@ check("a nameless Word file still gets a name",
 
 # --- refusing to write over anything ----------------------------------------
 
-_wroot = tempfile.mkdtemp(prefix="aa-import-")
+# A vault to write into: the three things that make a folder the top of this
+# textbook, and a chapters folder to import into, as the real one has.
+_vault = tempfile.mkdtemp(prefix="aa-vault-")
+os.makedirs(os.path.join(_vault, "chapters"))
+os.makedirs(os.path.join(_vault, "assets"))
+with open(os.path.join(_vault, "glossary.md"), "w") as fh:
+    fh.write("# Glossary\n")
+_wroot = os.path.join(_vault, "chapters")
 with open(os.path.join(_wroot, "taken.md"), "w") as fh:
     fh.write("# Already here\n")
 
 check("a name that is already taken is refused",
       "already a chapter" in (_convert.destination_problem(_wroot, "taken.md") or ""))
 check("a free name is allowed",
-      _convert.destination_problem(_wroot, "free.md") is None)
+      _convert.destination_problem(_wroot, "free.md") is None,
+      _convert.destination_problem(_wroot, "free.md"))
 check("a name with a folder in it is refused",
       "just a name" in (_convert.destination_problem(_wroot, "sub/x.md") or ""))
 check("a name that is not markdown is refused",
@@ -364,14 +372,113 @@ check("a name that is not markdown is refused",
 check("a name with characters a file cannot hold is refused",
       "cannot contain" in (_convert.destination_problem(_wroot, 'x?".md') or ""))
 
+# --- where the pictures go ---------------------------------------------------
+#
+# The whole point of this section: a converted chapter's pictures belong in the
+# vault's `assets/<chapter>/`, because that folder is what `admin/config.yml`
+# gives the website as its media folder, what `docs/editing-the-textbook.md`
+# tells authors to use, and - the one with teeth - what
+# `docs/for-course-coordinators.md` tells a department to copy when it builds
+# its own edition. A picture anywhere else is silently missing from every
+# edition of the book.
+
+check("a chapter's pictures are destined for the vault's assets folder, under "
+      "the chapter's own name",
+      _convert.media_destination(_wroot, "chapter-05.md")["rel"]
+      == "assets/chapter-05",
+      _convert.media_destination(_wroot, "chapter-05.md")["rel"])
+check("that folder really is inside the vault, not beside the chapter",
+      _convert.media_destination(_wroot, "chapter-05.md")["target"]
+      == os.path.join(_vault, "assets", "chapter-05"))
+check("the vault is found by walking up from the folder the author chose",
+      _convert.find_vault_root(_wroot) == _vault)
+_deep = os.path.join(_wroot, "Definitions")
+os.makedirs(_deep, exist_ok=True)
+check("and from a folder further down inside it",
+      _convert.find_vault_root(_deep) == _vault)
+check("a folder that is not inside a textbook is refused, not guessed at",
+      _convert.find_vault_root(tempfile.mkdtemp(prefix="aa-notvault-")) is None)
+_nowhere = tempfile.mkdtemp(prefix="aa-notvault-")
+check("and the refusal names the three things it looked for",
+      all(w in _convert.vault_problem(_nowhere)
+          for w in ("chapters", "assets", "glossary.md")),
+      _convert.vault_problem(_nowhere))
+check("a chapter cannot be imported into a folder outside a textbook",
+      _convert.destination_problem(_nowhere, "chapter-05.md") is not None)
+
+# The link written into the chapter has to work in Obsidian, on the published
+# site, and in a department edition where `chapters` and `assets` have been
+# copied inside a `content` folder. Only a path from the chapter to the picture
+# survives all three.
+check("the chapter links to its pictures by a path relative to itself",
+      _convert.media_destination(_wroot, "chapter-05.md")["link_prefix"]
+      == "../assets/chapter-05",
+      _convert.media_destination(_wroot, "chapter-05.md")["link_prefix"])
+check("a chapter saved at the top of the vault links to them without a step up",
+      _convert.media_destination(_vault, "chapter-05.md")["link_prefix"]
+      == "assets/chapter-05",
+      _convert.media_destination(_vault, "chapter-05.md")["link_prefix"])
+check("a chapter name with a space or a bracket in it still makes a link that works",
+      _convert.media_destination(_wroot, "Chapter 6 (final).md")["link_prefix"]
+      == "../assets/Chapter%206%20%28final%29",
+      _convert.media_destination(_wroot, "Chapter 6 (final).md")["link_prefix"])
+
+# One folder per chapter is not tidiness. Word calls the pictures in every
+# document image1.png, image2.png, so two chapters sharing a folder would write
+# over each other's figures.
+os.makedirs(os.path.join(_vault, "assets", "chapter-09"))
+with open(os.path.join(_vault, "assets", "chapter-09", "image1.png"), "wb") as fh:
+    fh.write(b"x")
+_clash = _convert.destination_problem(_wroot, "chapter-09.md") or ""
+check("a chapter whose pictures would land on another chapter's is refused",
+      "assets/chapter-09" in _clash, _clash)
+check("and the refusal says why one folder per chapter matters",
+      "image1" in _clash and "write over" in _clash, _clash)
+os.makedirs(os.path.join(_vault, "assets", "chapter-10"), exist_ok=True)
+check("an empty leftover folder is not a clash - there is nothing in it to lose",
+      _convert.destination_problem(_wroot, "chapter-10.md") is None,
+      _convert.destination_problem(_wroot, "chapter-10.md"))
+
+# --- the links in the converted text point at assets, not at the staging folder
+
+def _staged(text, files=("image1.png",), inner=True):
+    """Run the real link rewriting over a fake pandoc output."""
+    stage = tempfile.mkdtemp(prefix="aa-stage-")
+    where = os.path.join(stage, _convert.STAGE_MEDIA)
+    os.makedirs(os.path.join(where, "media") if inner else where)
+    for f in files:
+        open(os.path.join(where, "media" if inner else "", f), "wb").write(b"x")
+    return _convert._collect_media(stage, text, "../assets/chapter-05")
+
+
+_out, _got = _staged(
+    f'<img src="{_convert.STAGE_MEDIA}/media/image1.png" />\n')
+check("a picture link is rewritten to point into the vault's assets folder",
+      _out == '<img src="../assets/chapter-05/image1.png" />\n', _out)
+check("and nothing is left pointing at the temporary folder it was extracted to",
+      _convert.STAGE_MEDIA not in _out, _out)
+check("the picture itself is listed by name, ready to be reported on",
+      [m["name"] for m in _got] == ["image1.png"], _got)
+
+_out2, _ = _staged("![](" + _convert.STAGE_MEDIA + "/media/image1.png)\n")
+check("markdown-style picture links are rewritten too",
+      _out2 == "![](../assets/chapter-05/image1.png)\n", _out2)
+
+# pandoc only nests a "media" folder when that is where the picture sat inside
+# the Word file. When it does not, the links still have to move.
+_out3, _ = _staged(f'<img src="{_convert.STAGE_MEDIA}/image1.png" />\n',
+                   inner=False)
+check("pictures pandoc did not nest are redirected as well",
+      _out3 == '<img src="../assets/chapter-05/image1.png" />\n', _out3)
+
 # --- the report reads what actually came out --------------------------------
 #
 # Built from text rather than from a .docx so the suite still runs on a machine
 # with no pandoc. The shapes below are exactly what `pandoc -t gfm` produces.
 
-def _fake(text, media=None, media_dir="ch-media", warnings=None):
+def _fake(text, media=None, media_rel="assets/ch", warnings=None):
     return {"text": text, "media": media or [],
-            "media_dir": media_dir if media else None,
+            "media_rel": media_rel if media else None,
             "pandoc_warnings": warnings or [],
             "stage": "", "docx": "x.docx", "md_name": "ch.md"}
 
@@ -426,12 +533,16 @@ check("a chapter with a reference list is not",
       "This chapter has no References section"
       not in _heads("# A\n\nProse.\n\n## References\n\nArcher (1995).\n"))
 
-_pics = [{"rel": "ch-media/rId1.png", "name": "rId1.png", "ext": "png", "size": 900},
-         {"rel": "ch-media/rId2.emf", "name": "rId2.emf", "ext": "emf", "size": 900}]
+_pics = [{"rel": "rId1.png", "name": "rId1.png", "ext": "png", "size": 900},
+         {"rel": "rId2.emf", "name": "rId2.emf", "ext": "emf", "size": 900}]
 _pic_notes = _convert.report(_fake(
-    '<img src="ch-media/rId1.png" />\n', _pics))["notes"]
+    '<img src="../assets/ch/rId1.png" />\n', _pics))["notes"]
 check("pictures are reported with the folder they went into",
-      any("ch-media" in n["body"] for n in _pic_notes))
+      any("assets/ch" in n["body"] for n in _pic_notes))
+check("and the author is told it is the textbook's own pictures folder, "
+      "not one beside the chapter",
+      any("one folder per chapter" in n["body"] for n in _pic_notes),
+      [n["body"] for n in _pic_notes])
 check("a Word chart that came out as an unviewable file is a warning",
       any(n["level"] == "warn" and "nothing can display" in n["headline"]
           for n in _pic_notes))
@@ -471,7 +582,7 @@ check("no note tells the author to run anything",
 # otherwise every imported chapter carries a warning that means nothing.
 _htmlish = DocMap(
     "# Chapter\n\nA paragraph.\n\n"
-    "<figure>\n<img src=\"c-media/rId1.png\" alt=\"A diagram\" />\n"
+    "<figure>\n<img src=\"../assets/c/rId1.png\" alt=\"A diagram\" />\n"
     "<figcaption aria-hidden=\"true\"><p>A diagram</p></figcaption>\n</figure>\n\n"
     "<table>\n<tr><td><p>one</p>\n<p>two</p></td></tr>\n</table>\n",
     "c.md")
@@ -485,31 +596,62 @@ check("a genuinely wrapped paragraph is still spotted",
 
 # --- the real thing, when this machine has pandoc ---------------------------
 
+import base64  # noqa: E402
+import urllib.parse  # noqa: E402
+
+# A real one-pixel PNG, so the picture in the fixture is one Word and pandoc
+# both accept and the whole picture path is exercised, not simulated.
+_ONE_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
+    "hQGAhKmMIQAAAABJRU5ErkJggg==")
+
 _pandoc, _ = _convert.find_pandoc()
 if _pandoc:
+    with open(os.path.join(_wroot, "figure.png"), "wb") as fh:
+        fh.write(_ONE_PIXEL_PNG)
     _src = os.path.join(_wroot, "src.md")
     with open(_src, "w") as fh:
         fh.write("# Chapter Nine\n\n" + ("A long paragraph. " * 40) + "\n\n"
+                 "![A diagram](figure.png)\n\n"
                  "## References\n\nArcher, M. S. (1995). *Realist social "
                  "theory*.\n")
     _docx = os.path.join(_wroot, "src.docx")
-    subprocess.run([_pandoc, _src, "-o", _docx], check=True,
+    subprocess.run([_pandoc, _src, "-o", _docx], check=True, cwd=_wroot,
                    capture_output=True, timeout=120)
 
-    _result = _convert.convert(_docx, "Chapter 9.md")
+    _result = _convert.convert(_docx, "Chapter 9.md", _wroot)
     _para = [ln for ln in _result["text"].split("\n")
              if ln.startswith("A long paragraph")]
     check("a real conversion puts the whole paragraph on one line",
           len(_para) == 1 and len(_para[0]) > 400)
     check("a real conversion keeps the headings",
           _result["text"].startswith("# Chapter Nine"))
+    check("a real conversion sends its pictures to the vault's assets folder",
+          _result["media_rel"] == "assets/Chapter 9", _result["media_rel"])
+    check("and the links in the chapter say so, before anything is written",
+          "../assets/Chapter%209/" in _result["text"]
+          and _convert.STAGE_MEDIA not in _result["text"],
+          [ln for ln in _result["text"].split("\n") if "img" in ln or "![" in ln])
 
-    _dest = os.path.join(_wroot, "vault")
-    os.makedirs(_dest)
-    _chapter, _media = _convert.save(_result, _dest)
+    _chapter, _media = _convert.save(_result, _wroot)
     check("the converted chapter is written where the author chose",
           os.path.isfile(_chapter)
-          and _chapter == os.path.join(_dest, "Chapter 9.md"))
+          and _chapter == os.path.join(_wroot, "Chapter 9.md"))
+    _pic_name = _result["media"][0]["name"]
+    check("its pictures are written into the vault's assets folder, not beside it",
+          _media == os.path.join(_vault, "assets", "Chapter 9")
+          and os.path.isfile(os.path.join(_media, _pic_name)),
+          _media)
+    check("nothing is left beside the chapter for a department edition to miss",
+          not os.path.isdir(os.path.join(_wroot, "Chapter 9-media")))
+    # The link is followed from where the chapter actually sits, which is the
+    # only test that catches a link that is well-formed but points nowhere.
+    _linked = urllib.parse.unquote(
+        re.search(r'src="([^"]+)"', _result["text"]).group(1))
+    check("and the link in the saved chapter reaches the picture that is there",
+          os.path.isfile(os.path.normpath(
+              os.path.join(os.path.dirname(_chapter), _linked))),
+          _linked)
 
     # The point of all of it: the new chapter is one the analyses can work on.
     _s2 = Session(_chapter)

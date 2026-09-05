@@ -117,20 +117,20 @@ const fetch = async (route, opts) => {
     '/api/import/convert': (() => { lastConvertBody = body; return {
       name: 'Chapter 6.md', path: '/v/Chapters/Chapter 6.md',
       text: '# Chapter Six\n\nA paragraph.\n', folder: '/v/Chapters',
-      media_dir: 'Chapter 6-media',
-      media: [{ rel: 'Chapter 6-media/rId1.png', name: 'rId1.png', ext: 'png', size: 2048 }],
+      media_rel: 'assets/Chapter 6',
+      media: [{ rel: 'rId1.png', name: 'rId1.png', ext: 'png', size: 2048 }],
       counts: { lines: 3, words: 4, pictures: 1, headings: 1,
                 pipe_tables: 0, html_tables: 1, footnotes: 2 },
       notes: [
         { level: 'ok', headline: '1 picture was taken out of the Word file',
-          body: 'It is in a folder called "Chapter 6-media".', check: 'Look at it.' },
+          body: 'It is in "assets/Chapter 6".', check: 'Look at it.' },
         { level: 'warn', headline: '1 table could not be made into a proper table',
           body: 'Its cells were merged.', check: 'Unmerge them in Word.' },
       ],
     }; })(),
     '/api/import/save': {
       chapter: '/v/Chapters/Chapter 6.md', chapter_name: 'Chapter 6.md',
-      media: '/v/Chapters/Chapter 6-media', media_name: 'Chapter 6-media',
+      media: '/v/assets/Chapter 6', media_name: 'assets/Chapter 6',
       folder: '/v/Chapters',
     },
     '/api/import/cancel': { ok: true },
@@ -339,7 +339,7 @@ function check(name, cond, got) {
         els['import-text'].textContent);
   check('the pictures are listed with where they will go',
         els['import-media-list'].children.length === 1 &&
-        els['import-media-note'].textContent.includes('Chapter 6-media'),
+        els['import-media-note'].textContent.includes('assets/Chapter 6'),
         els['import-media-note'].textContent);
   check('saving is refused until the author says they have looked',
         els['do-import-save'].disabled === true, els['do-import-save'].disabled);
@@ -353,6 +353,11 @@ function check(name, cond, got) {
   check('after saving, the author is told where the chapter and pictures went',
         !els['step-import-done'].classList.contains('hidden') &&
         els['import-done-summary'].children.length > 0, 'nothing shown');
+  const doneText = (function gather(n) {
+    return (n.textContent || '') + (n.children || []).map(gather).join(' ');
+  })(els['import-done-summary']);
+  check('and the pictures are named by their place in the textbook, not beside the chapter',
+        doneText.includes('assets/Chapter 6'), doneText);
 
   await els['import-analyse'].onclick();
   await new Promise(r => setTimeout(r, 30));

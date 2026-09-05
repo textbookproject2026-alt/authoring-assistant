@@ -130,9 +130,22 @@ Word can hold things that a chapter file cannot, so some parts come across bette
 than others. The tool tells you which, every time, for the document in front of
 you. In general:
 
-**Pictures** are taken out of the Word file and put in a folder next to the
-chapter, named after it — a chapter called `Chapter 6.md` gets a folder called
-`Chapter 6-media`. Obsidian finds them there on its own. Two things to watch for.
+**Pictures** are taken out of the Word file and put in your textbook's own
+`assets` folder, in a folder named after the chapter — a chapter called
+`chapter-05.md` gets `assets/chapter-05/`. That is where every chapter's pictures
+live, one folder per chapter: it is where Obsidian looks, where the website
+looks, and it is the folder a department copies when it makes its own edition of
+the book, so a picture kept anywhere else would be missing from every edition.
+One folder per chapter is not tidiness either — Word calls the pictures inside
+every document `image1`, `image2`, so two chapters sharing a folder would write
+over each other's figures.
+
+The tool works the `assets` folder out for itself from where you put the chapter,
+by looking upwards for the top of your textbook — the folder holding `chapters`,
+`assets` and `glossary.md`. If it cannot find one it says so and writes nothing,
+rather than putting the pictures somewhere plausible and wrong.
+
+Two things to watch for.
 The picture files keep the meaningless names Word gave them inside the document,
 which you may want to rename later. And **charts, SmartArt and pasted
 spreadsheets are not really pictures** — Word draws them itself — so they come out

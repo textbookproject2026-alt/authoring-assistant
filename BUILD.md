@@ -166,7 +166,7 @@ a rival. It is removed on exit, and a stale one is detected and ignored.
 fixed set of flags:
 
 ```
--f docx -t gfm --wrap=none --extract-media=<chapter>-media
+-f docx -t gfm --wrap=none --extract-media=aa-extracted-media
 ```
 
 **`--wrap=none` is not a preference.** Without it pandoc breaks every paragraph
@@ -210,17 +210,42 @@ machine rather than on the author's Mac.
 
 **Nothing is written until the author says so.** `convert.convert()` works in a
 `tempfile.mkdtemp()` staging folder; `convert.save()` is the only thing that
-touches the vault. It refuses to overwrite an existing chapter or an existing
-media folder — there is no undo in this tool — and writes the media folder before
-the chapter, so a chapter never exists in the vault pointing at pictures that
-failed to copy.
+touches the vault. It refuses to overwrite an existing chapter or a picture
+folder that already has something in it — there is no undo in this tool — and
+writes the pictures before the chapter, so a chapter never exists in the vault
+pointing at pictures that failed to copy. If the chapter then fails to write, only
+a picture folder the tool created itself is removed again.
 
-**The one rewrite.** pandoc extracts a picture to `<dir>/media/x.png`, keeping the
-path it had inside the `.docx`. `_tidy_media_folder` lifts those up one level and
-fixes the links, but only when the extracted tree is exactly that shape; anything
-else is left as pandoc arranged it, links intact. This breaks no promise: the
-untouched-lines rule is about chapters that already exist, and this file does not
-yet.
+**Where the pictures go.** Into the vault's `assets/<chapter>/`, not beside the
+chapter. Three things outside this repository depend on that: the vault's
+`docs/editing-the-textbook.md` tells authors to keep a chapter's images in
+`assets/<chapter>/`; the CMS's `admin/config.yml` sets `media_folder: assets`;
+and `docs/for-course-coordinators.md` tells a department building its own edition
+to copy `chapters` and `assets` and nothing else — so a picture kept anywhere
+else is silently missing from every edition. One folder per chapter is load-
+bearing too: Word names the pictures inside every document `image1.png`,
+`image2.png`, and two chapters sharing a folder would overwrite each other.
+
+The author chooses the folder the chapter goes in, not the vault, so
+`convert.find_vault_root()` walks up from that folder looking for the three
+things that make a folder the top of this textbook — `chapters/`, `assets/` and
+`glossary.md`. If it does not find them the import stops with
+`convert.vault_problem()` rather than guessing; a plausible wrong answer here is
+exactly the failure this arrangement exists to prevent.
+
+**The rewrites.** pandoc extracts a picture to `aa-extracted-media/media/x.png`,
+keeping the path it had inside the `.docx`, and writes every link to match.
+`_collect_media` lifts the inner `media/` level away when the extracted tree is
+exactly that shape (anything else is left as pandoc arranged it), and then
+replaces the staging prefix throughout the text with the path from the chapter to
+its folder under `assets` — `../assets/chapter-05`, percent-encoded, because a
+chapter may be called `Chapter 6 (final)`. The link is relative to the chapter
+rather than rooted at the vault because it has to resolve in three places at
+once: Obsidian, the published site, and a department edition where `chapters` and
+`assets` sit inside a `content` folder. Both rewrites happen before the author
+sees the preview, so the links they read are the links that get written. This
+breaks no promise: the untouched-lines rule is about chapters that already exist,
+and this file does not yet.
 
 ---
 

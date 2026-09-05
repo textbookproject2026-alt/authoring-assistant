@@ -7,13 +7,16 @@ same one; what is new is that the file is chosen with the file picker, the resul
 is shown before it is written, and what came out badly is explained in words
 rather than left to be discovered later.
 
-Three rules shape everything here.
+Four rules shape everything here.
 
   * Nothing is written into the vault until the author has seen the whole
     converted chapter and said yes. Conversion happens in a temporary folder.
   * We never overwrite. If a chapter of that name already exists we stop and ask
     for another name, because this tool has no undo.
   * The conversion flags are fixed, not options. See PANDOC_ARGS below.
+  * The pictures go into the vault's own `assets` folder, one folder per
+    chapter - not beside the chapter. See "where the pictures go" below for the
+    three things that depend on that and cannot see this code.
 """
 
 import glob
@@ -43,8 +46,11 @@ from . import config
 #               rewritten paragraph in every diff, for ever. Do not remove this,
 #               and do not make it an option the author can turn off.
 #
-# --extract-media  pulls the pictures out of the .docx into a folder beside the
-#               chapter, instead of leaving them locked inside the Word file.
+# --extract-media  pulls the pictures out of the .docx instead of leaving them
+#               locked inside the Word file. pandoc puts them in a folder beside
+#               the chapter and writes the links to match; neither is where they
+#               belong, so both are redirected into the vault's `assets` folder
+#               afterwards. See "where the pictures go" below.
 #
 PANDOC_ARGS = ["-f", "docx", "-t", "gfm", "--wrap=none"]
 
@@ -260,17 +266,127 @@ def _slug(md_name):
     return os.path.splitext(os.path.basename(md_name))[0]
 
 
+# --- where the pictures go ---------------------------------------------------
+#
+# Into the vault's `assets` folder, in a folder named after the chapter:
+# `chapters/chapter-05.md` puts its pictures in `assets/chapter-05/`. Three
+# things outside this file depend on that, and none of them can see this code:
+#
+#   * `docs/editing-the-textbook.md` tells authors that a chapter's images live
+#     in `assets/<chapter>/`, a fresh folder per chapter.
+#   * `admin/config.yml` gives the website's editor `media_folder: assets`, so a
+#     picture added through the website lands there too.
+#   * `docs/for-course-coordinators.md` tells a department building its own
+#     edition to copy `chapters` and `assets`, and nothing else. A picture kept
+#     anywhere else is missing from every edition, and missing silently.
+#
+# One folder per chapter is not tidiness. Word names the pictures inside every
+# document `image1.png`, `image2.png`, so two chapters sharing a folder would
+# write over each other's figures.
+#
+# The author chooses the folder the chapter goes in, not the vault, so the vault
+# has to be worked out by walking up from that folder until we find the three
+# things that make a folder the top of this textbook. If we do not find them we
+# stop and say so. Guessing would put the pictures somewhere plausible and
+# wrong, which is the failure this exists to prevent.
+
+MEDIA_ROOT = "assets"           # the folder in the vault all pictures live in
+VAULT_SEARCH_DEPTH = 8          # how far up to look before giving up
+STAGE_MEDIA = "aa-extracted-media"   # what pandoc extracts into, in /tmp only
+
+
+def _is_vault_root(path):
+    return (os.path.isdir(os.path.join(path, "chapters"))
+            and os.path.isdir(os.path.join(path, MEDIA_ROOT))
+            and os.path.isfile(os.path.join(path, "glossary.md")))
+
+
+def find_vault_root(folder):
+    """The top of the textbook, found by walking up from the chosen folder.
+
+    None when the chosen folder is not inside one. Callers must not carry on
+    with a guess - say so instead, with vault_problem().
+
+    Not the same thing as session.find_vault_root(), which starts from a chapter
+    the author already has, looks for Obsidian's own `.obsidian` folder, and
+    falls back to the chapter's own folder rather than failing. That fallback is
+    harmless there and would be the whole bug here.
+    """
+    if not folder:
+        return None
+    probe = os.path.abspath(folder)
+    for _ in range(VAULT_SEARCH_DEPTH):
+        if _is_vault_root(probe):
+            return probe
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    return None
+
+
+def vault_problem(folder):
+    """Why we could not find the textbook, in the author's words."""
+    return (
+        "That folder does not seem to be inside your textbook. A chapter's "
+        "pictures are kept in the textbook's own “assets” folder, so this tool "
+        "has to be able to find the top of the textbook — the folder holding "
+        "“chapters”, “assets” and “glossary.md” - by looking upwards from where "
+        "the chapter is going. Starting at “"
+        + (os.path.basename(os.path.abspath(folder).rstrip(os.sep)) or folder)
+        + "” it did not find one. Please choose a folder inside your textbook, "
+        "such as its “chapters” folder."
+    )
+
+
+def media_destination(folder, md_name):
+    """Where this chapter's pictures go, and how the chapter links to them.
+
+    None when the folder is not inside a vault. Otherwise a dict:
+
+      vault        the top of the textbook
+      target       the folder the pictures are copied into
+      rel          that folder as the author would name it: assets/chapter-05
+      link_prefix  what goes in the chapter's picture links
+
+    The link is relative to the chapter, not rooted at the vault, because it has
+    to work in three places at once: Obsidian on the author's Mac, the published
+    site, and a department edition where `chapters` and `assets` have been
+    copied inside a `content` folder. A path from the chapter to the picture is
+    the only one that survives all three. It is percent-encoded because a
+    chapter may be called "Chapter 6 (final)" and a raw space or bracket would
+    break the link.
+    """
+    vault = find_vault_root(folder)
+    if not vault:
+        return None
+    stem = _slug(md_name)
+    target = os.path.join(vault, MEDIA_ROOT, stem)
+    rel = os.path.relpath(target, vault)
+    from_chapter = os.path.relpath(target, os.path.abspath(folder))
+    link = "/".join(urllib.parse.quote(part)
+                    for part in from_chapter.split(os.sep))
+    return {"vault": vault, "target": target,
+            "rel": rel.replace(os.sep, "/"), "link_prefix": link}
+
+
 # --- the conversion itself ---------------------------------------------------
 
 class ConversionFailed(Exception):
     pass
 
 
-def convert(docx_path, md_name):
+def convert(docx_path, md_name, folder):
     """Convert into a temporary folder. Nothing in the vault is touched.
 
-    Returns a dict holding the converted text, the staging folder, the media
-    folder's name, and the list of pictures that came out.
+    `folder` is where in the vault the chapter is going. It is needed here and
+    not only at save time because the picture links written into the text point
+    into the vault's `assets` folder, and the author reads the whole converted
+    chapter before agreeing to save it - so the links they read have to be the
+    ones that will be written.
+
+    Returns a dict holding the converted text, the staging folder, where the
+    pictures are going, and the list of pictures that came out.
     """
     pandoc, _ = find_pandoc()
     if not pandoc:
@@ -281,13 +397,17 @@ def convert(docx_path, md_name):
         raise ConversionFailed("That Word document could not be found. Please "
                                "choose it again.")
 
+    dest = media_destination(folder, md_name)
+    if dest is None:
+        raise ConversionFailed(vault_problem(folder))
+
     stage = tempfile.mkdtemp(prefix="aa-import-")
-    slug = _slug(md_name)
-    media_dir = slug + "-media"
     out_name = "converted.md"
 
+    # Extracted under a fixed name in the temporary folder, never under the name
+    # it is going to have. The links are rewritten off it below.
     argv = [pandoc, os.path.abspath(docx_path)] + PANDOC_ARGS + [
-        f"--extract-media={media_dir}", "-o", out_name,
+        f"--extract-media={STAGE_MEDIA}", "-o", out_name,
     ]
     try:
         proc = subprocess.run(argv, cwd=stage, capture_output=True, text=True,
@@ -322,13 +442,14 @@ def convert(docx_path, md_name):
         raise ConversionFailed("The converted chapter could not be read back: "
                                + str(e))
 
-    text, media = _tidy_media_folder(stage, media_dir, text)
+    text, media = _collect_media(stage, text, dest["link_prefix"])
 
     warnings = [w for w in (proc.stderr or "").strip().split("\n") if w.strip()]
     return {
         "stage": stage,
         "text": text,
-        "media_dir": media_dir if media else None,
+        "media_rel": dest["rel"] if media else None,
+        "media_target": dest["target"] if media else None,
         "media": media,
         "pandoc_warnings": warnings[:12],
         "docx": os.path.abspath(docx_path),
@@ -336,20 +457,26 @@ def convert(docx_path, md_name):
     }
 
 
-def _tidy_media_folder(stage, media_dir, text):
-    """Flatten pandoc's extra folder level and list what came out.
+def _collect_media(stage, text, link_prefix):
+    """Flatten pandoc's extra folder level, point the links at `assets`, and say
+    what came out.
 
-    pandoc puts a picture at `<media_dir>/media/name.png`, because that is where
-    it sat inside the Word file. Nobody wants a folder called "media" inside a
-    folder called "chapter-media", so when that is exactly the shape we find, we
-    lift the contents up one level and fix the links to match. Anything else is
-    left exactly as pandoc arranged it, and the links still point at it.
+    pandoc puts a picture at `<STAGE_MEDIA>/media/name.png`, because that is
+    where it sat inside the Word file, and writes every link in the chapter to
+    match. Two things are wrong with that and both are fixed here. Nobody wants
+    a folder called "media" inside the folder, so when that is exactly the shape
+    we find, the contents are lifted up one level. And the staging folder is not
+    where the pictures are going, so its name is replaced throughout the text by
+    the path from the chapter to its folder under `assets`.
+
+    Anything other than that one inner "media" folder is left exactly as pandoc
+    arranged it, and the links still point at it - only the prefix moves.
 
     This is a brand-new file that is not in the vault yet, so rewriting it here
     breaks no promise: the untouched-lines rule applies to chapters that already
     exist.
     """
-    full = os.path.join(stage, media_dir)
+    full = os.path.join(stage, STAGE_MEDIA)
     if not os.path.isdir(full):
         return text, []
 
@@ -359,13 +486,15 @@ def _tidy_media_folder(stage, media_dir, text):
         for name in os.listdir(inner):
             shutil.move(os.path.join(inner, name), os.path.join(full, name))
         os.rmdir(inner)
-        text = text.replace(f"{media_dir}/media/", f"{media_dir}/")
+        text = text.replace(f"{STAGE_MEDIA}/media/", f"{STAGE_MEDIA}/")
+
+    text = text.replace(f"{STAGE_MEDIA}/", f"{link_prefix}/")
 
     media = []
     for path in sorted(glob.glob(os.path.join(full, "**", "*"), recursive=True)):
         if os.path.isfile(path):
             media.append({
-                "rel": os.path.relpath(path, stage),
+                "rel": os.path.relpath(path, full),
                 "name": os.path.basename(path),
                 "ext": os.path.splitext(path)[1].lower().lstrip("."),
                 "size": os.path.getsize(path),
@@ -395,11 +524,35 @@ def destination_problem(folder, md_name):
     if not os.access(folder, os.W_OK):
         return ("That folder is read-only, so nothing could be saved into it. "
                 "Please choose another one.")
+
+    # The pictures do not go here, so where they do go is checked here too.
+    # Finding this out before the conversion rather than after it means the
+    # author is never told, at the end of a long import, that it cannot land.
+    dest = media_destination(folder, md_name)
+    if dest is None:
+        return vault_problem(folder)
+    if os.path.isdir(dest["target"]) and os.listdir(dest["target"]):
+        return (f"There is already a folder of pictures called “{dest['rel']}” "
+                "in your textbook, and this chapter's pictures would have to go "
+                "into it. Every chapter keeps its pictures in a folder of its "
+                "own, because Word calls the pictures in every document by the "
+                "same names — image1, image2 — so two chapters sharing a "
+                "folder "
+                "would write over each other's. Please give this chapter a "
+                "different name.")
+    if not os.access(os.path.join(dest["vault"], MEDIA_ROOT), os.W_OK):
+        return ("Your textbook's “assets” folder is read-only, so this "
+                "chapter's pictures could not be saved into it. Nothing has "
+                "been written.")
     return None
 
 
 def save(result, folder):
     """Write the converted chapter and its pictures into the vault.
+
+    The chapter goes in the folder the author chose. The pictures go into the
+    vault's `assets` folder under the chapter's own name, which is what the
+    links in the chapter already say. See "where the pictures go" above.
 
     Returns (chapter_path, media_folder_path or None).
     """
@@ -410,18 +563,23 @@ def save(result, folder):
 
     chapter_path = os.path.join(folder, md_name)
     media_target = None
+    made_media = False
 
-    if result.get("media_dir"):
-        media_target = os.path.join(folder, result["media_dir"])
-        if os.path.exists(media_target):
+    if result.get("media_target"):
+        media_target = result["media_target"]
+        # Checked again here, at the moment of writing, and not only in
+        # destination_problem above: this tool has no undo, and a folder can
+        # appear between the two.
+        if os.path.isdir(media_target) and os.listdir(media_target):
             raise KeyError(
-                f"There is already a folder called “{result['media_dir']}” next "
-                "to where this chapter would go, and the pictures would have to "
-                "go into it. Nothing was written. Please give the chapter a "
-                "different name."
+                f"There is already a folder of pictures called "
+                f"“{result['media_rel']}” in your textbook, and this chapter's "
+                "pictures would have to go into it. Nothing was written. "
+                "Please give the chapter a different name."
             )
-        shutil.copytree(os.path.join(result["stage"], result["media_dir"]),
-                        media_target)
+        made_media = not os.path.exists(media_target)
+        shutil.copytree(os.path.join(result["stage"], STAGE_MEDIA),
+                        media_target, dirs_exist_ok=True)
 
     # The chapter goes last, so a chapter never exists in the vault pointing at
     # pictures that failed to copy.
@@ -435,7 +593,8 @@ def save(result, folder):
             os.remove(tmp)
         except OSError:
             pass
-        if media_target and os.path.isdir(media_target):
+        # Only what we made ourselves is taken away again.
+        if made_media and media_target and os.path.isdir(media_target):
             shutil.rmtree(media_target, ignore_errors=True)
         raise
     return chapter_path, media_target
@@ -514,7 +673,7 @@ def report(result):
 
 def _pictures_notes(result, text, lines):
     media = result.get("media") or []
-    folder = result.get("media_dir")
+    folder = result.get("media_rel")
     out = []
 
     referenced = set()
@@ -552,8 +711,12 @@ def _pictures_notes(result, text, lines):
         ("1 picture was" if one else f"{len(media)} pictures were")
         + " taken out of the Word file",
         ("It is" if one else "They are")
-        + f" saved in a folder called “{folder}”, which sits next to the "
-        "chapter. Obsidian finds "
+        + " saved in your textbook's pictures folder, in a folder of "
+        + ("its" if one else "their")
+        + f" own: “{folder}”. That is where every chapter's pictures go, one "
+        "folder per chapter — it is where Obsidian looks, where the website "
+        "looks, and what a department copies when it makes its own edition of "
+        "the book. Obsidian finds "
         + ("it" if one else "them")
         + " there on its own. The names are the ones Word gave them inside the "
         "document, which are not meaningful — you can rename them later if you "
