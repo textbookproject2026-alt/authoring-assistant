@@ -620,7 +620,7 @@ def r_console_load(handler, data):
     if not token:
         _needs_signin()
 
-    out = {"suggestions": [], "drafts": [], "weekly": [],
+    out = {"suggestions": [], "drafts": [], "weekly": [], "publish": None,
            "problems": [], "offline": False}
 
     if CONSOLE["who"] is None:
@@ -647,6 +647,13 @@ def r_console_load(handler, data):
         out["offline"] = out["offline"] or prs.offline
     else:
         out["drafts"] = [console.describe_change(p) for p in prs]
+
+    publish, publish_problem = _publish_state(token)
+    if publish_problem is not None:
+        out["problems"].append("Going live: " + publish_problem.message)
+        out["offline"] = out["offline"] or publish_problem.offline
+    else:
+        out["publish"] = publish
 
     weekly = github.weekly_status(token)
     if isinstance(weekly, github.Problem):
@@ -742,6 +749,114 @@ def r_console_decline(handler, data):
                                     "The suggestion was closed."]}
 
 
+# --- the one door from the drafts area to the live book ----------------------
+#
+# Accepting a change folds it into the drafts area. That is not the live book,
+# and on its own it reaches no reader: the author's vault tracks the live book,
+# and nothing moves the drafts across. So accepting also puts the drafts in line
+# for the live book, by opening — or refreshing — the single pull request that
+# carries them.
+#
+# It stops there deliberately. It does not merge that request itself. The drafts
+# area is shared: it holds whatever has been written in the browser editor as
+# well as whatever has been accepted here, so merging it would publish other
+# people's unreviewed work on the strength of one press about one change. The
+# live book is also protected and has checks of its own, and the author's vault
+# tracks it, so writing to it behind his back would leave his own copy silently
+# out of date. Publishing is therefore its own deliberate press, on its own
+# screen, showing what would go — the same reasoning that keeps the weekly
+# generated pull requests out of this app.
+
+
+def _publish_state(token, tries=1):
+    """What stands between the drafts area and the live book.
+
+    Reads; never opens or changes anything. Returns (info, problem). `info` is
+    None when the live book already has everything the drafts area holds.
+    """
+    compare = github.drafts_ahead_of_live(token)
+    if isinstance(compare, github.Problem):
+        return None, compare
+    existing = github.open_publish_request(token)
+    if isinstance(existing, github.Problem):
+        return None, existing
+
+    if existing is None:
+        if int(compare.get("ahead_by") or 0) <= 0:
+            return None, None
+        # Something is waiting with no way through. Said out loud rather than
+        # left as a silently shut door.
+        files = [f for f in (compare.get("files") or []) if isinstance(f, dict)]
+        return {
+            "open": False,
+            "waiting": True,
+            "number": None,
+            "url": "",
+            "page_count": len(files),
+            "pages": [],
+            "change_count": int(compare.get("ahead_by") or 0),
+            "who": [],
+            "state": "not_open",
+            "state_words": console.PUBLISH_NOT_OPEN,
+            "can_publish": False,
+        }, None
+
+    state = github.mergeability(token, existing.get("number"), tries=tries)
+    info = console.describe_publish(existing, compare, state)
+    info["open"] = True
+    info["waiting"] = False
+    return info, None
+
+
+def _open_or_refresh_publish_request(token):
+    """Make sure the one publish request is open and says what the drafts area
+    now holds. Returns (info, problem).
+
+    There is only ever one, and its description is rewritten rather than added
+    to, because what it carries is the drafts area as it stands — including
+    anything written in the browser editor — and not the change just accepted.
+    """
+    compare = github.drafts_ahead_of_live(token)
+    if isinstance(compare, github.Problem):
+        return None, compare
+    existing = github.open_publish_request(token)
+    if isinstance(existing, github.Problem):
+        return None, existing
+
+    if existing is None and int(compare.get("ahead_by") or 0) <= 0:
+        return None, None
+
+    body = console.publish_request_body(compare)
+    if existing is not None:
+        pr = github.update_publish_request(
+            token, existing.get("number"), console.PUBLISH_TITLE, body)
+        if isinstance(pr, github.Problem):
+            # The request is open and carries the change whatever happens to
+            # its description; only the description is now out of date, which
+            # is not worth telling the author the accept failed over.
+            pr = existing
+        opened = False
+    else:
+        pr = github.create_publish_request(token, console.PUBLISH_TITLE, body)
+        opened = True
+        if isinstance(pr, github.Problem):
+            # Another copy of the app, or the author on the web, may have opened
+            # one in the moment between looking and asking.
+            again = github.open_publish_request(token)
+            if isinstance(again, github.Problem) or again is None:
+                return None, pr
+            pr, opened = again, False
+
+    # Just opened or just changed, so the answer is not ready yet; wait a little
+    # rather than report "not known" when a moment would settle it.
+    state = github.mergeability(token, pr.get("number"), tries=4)
+    info = console.describe_publish(pr, compare, state)
+    info["open"] = True
+    info["waiting"] = False
+    info["opened"] = opened
+    return info, None
+
+
 def r_console_draft_detail(handler, data):
     token = _token()
     if not token:
@@ -753,17 +868,119 @@ def r_console_draft_detail(handler, data):
 
 
 def r_console_draft_accept(handler, data):
+    """Accept a proposed change, and put it in line for the live book.
+
+    Two things happen, in this order, and they are reported separately: the
+    change is folded into the drafts area, and the drafts area is put in line to
+    go to readers. If the first works and the second does not, the author is
+    told exactly that — the change is safe, nothing has reached readers, and it
+    can be tried again — rather than one sentence that hides which half failed.
+
+    Publishing is not done here. See the note above _publish_state.
+    """
     token = _token()
     if not token:
         _needs_signin()
     number = data.get("number")
     title = data.get("title") or "Accepted draft change"
+
     result = github.accept_change(token, number, title)
     if isinstance(result, github.Problem):
         raise RuntimeError(result.message)
-    return {"done": True,
-            "steps": ["The draft change was accepted into the drafts area.",
-                      "It reaches readers when you next publish."]}
+
+    steps = ["The change was folded into the drafts area."]
+
+    info, problem = _open_or_refresh_publish_request(token)
+    if problem is not None:
+        return {
+            "done": True,
+            "steps": steps,
+            "publish": None,
+            "warning": (
+                "The change is safely in the drafts area, but it could not be "
+                "put in line for the live book: " + problem.message +
+                " Nothing has reached readers, and nothing was lost. Go back "
+                "and press “Put it in line” to try again."
+            ),
+        }
+
+    if info is None:
+        steps.append("The live book already has this, so there is nothing "
+                     "waiting to go to readers.")
+        return {"done": True, "steps": steps, "publish": None, "warning": ""}
+
+    steps.append(
+        "It was put in line for the live book, along with everything else "
+        "waiting in the drafts area."
+        if info.get("opened") else
+        "It joined the changes already in line for the live book."
+    )
+    steps.append("Nothing has reached readers yet. Publishing is a separate "
+                 "press, under “Going live” on the previous screen.")
+
+    warning = ""
+    if info.get("state") == "conflict":
+        warning = info.get("state_words", "")
+    else:
+        steps.append(info.get("state_words", ""))
+    return {"done": True, "steps": steps, "publish": info, "warning": warning}
+
+
+def r_console_publish_prepare(handler, data):
+    """Put whatever is in the drafts area in line for the live book.
+
+    Opens the publish request, or refreshes its description if one is already
+    open. Publishes nothing.
+    """
+    token = _token()
+    if not token:
+        _needs_signin()
+    info, problem = _open_or_refresh_publish_request(token)
+    if problem is not None:
+        raise RuntimeError(problem.message)
+    return {"publish": info}
+
+
+def r_console_publish(handler, data):
+    """Send the drafts to the live book.
+
+    Only ever reached by a deliberate press with the box ticked, and only when
+    the change was shown to be publishable as it stands.
+    """
+    token = _token()
+    if not token:
+        _needs_signin()
+    try:
+        number = int(data.get("number") or 0)
+    except (TypeError, ValueError):
+        number = 0
+    if not number:
+        raise KeyError("There is nothing in line for the live book just now.")
+    if not data.get("confirm"):
+        raise KeyError("Please tick the box to confirm before publishing.")
+
+    # Only ever the one request the author was shown. A screen left open while
+    # the drafts moved on must not merge something else into the live book.
+    existing = github.open_publish_request(token)
+    if isinstance(existing, github.Problem):
+        raise RuntimeError(existing.message)
+    if existing is None or int(existing.get("number") or 0) != number:
+        raise KeyError(
+            "What is waiting to go live has changed since this screen was "
+            "drawn, so nothing was published. Press “Check again” and look at "
+            "it before publishing."
+        )
+
+    result = github.publish(token, number, console.PUBLISH_TITLE)
+    if isinstance(result, github.Problem):
+        raise RuntimeError(result.message)
+    if not result.get("merged"):
+        raise RuntimeError(
+            "The service did not confirm that this was published, so it may "
+            "not have been. Press “Check again” and look before trying once "
+            "more."
+        )
+    return {"done": True, "steps": list(console.PUBLISHED_STEPS)}
 
 
 def r_console_draft_decline(handler, data):
@@ -813,6 +1030,8 @@ ROUTES = {
     "/api/console/draft-detail": r_console_draft_detail,
     "/api/console/draft-accept": r_console_draft_accept,
     "/api/console/draft-decline": r_console_draft_decline,
+    "/api/console/publish-prepare": r_console_publish_prepare,
+    "/api/console/publish": r_console_publish,
 }
 
 

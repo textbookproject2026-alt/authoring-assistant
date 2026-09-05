@@ -313,3 +313,150 @@ def describe_change(pr):
         "when": pr.get("created_at"),
         "url": pr.get("html_url", ""),
     }
+
+
+# --- getting the drafts to readers -------------------------------------------
+#
+# Accepting a change puts it in the drafts area and no further. The drafts area
+# is shared — it also holds whatever has been written in the browser editor — so
+# what goes to readers is always the drafts area as a whole, never one change on
+# its own. That is what the publish request describes, and why its description
+# is rewritten every time rather than added to.
+
+PUBLISH_TITLE = "Publish the drafts to the live book"
+
+PUBLISH_INTRO = (
+    "Everything now waiting in the drafts area, gathered so that it can go to "
+    "readers in one go.\n\n"
+    "This is not only the change that was accepted most recently. The drafts "
+    "area also holds anything written in the browser editor, so what follows is "
+    "the drafts area exactly as it stood when this description was last "
+    "rewritten. Merging this is what publishes it; until then nothing here has "
+    "reached a reader."
+)
+
+PUBLISH_FOOTER = "_Opened and kept up to date by the author's console._"
+
+PUBLISH_NOT_OPEN = (
+    "There is work in the drafts area that has not been put in line for the "
+    "live book yet. Press “Put it in line” and it will be."
+)
+
+PUBLISHED_STEPS = [
+    "The drafts were sent to the live book.",
+    "The site rebuilds itself from there, which takes a few minutes. Readers "
+    "see the change once it has.",
+    "Your vault does not know about this yet. Take the latest into Obsidian "
+    "before you write there again, or your copy and the live book will "
+    "disagree with each other.",
+]
+
+# How many of each to name before saying "and more". A description nobody can
+# read is no more honest than no description at all.
+MAX_LISTED = 40
+
+
+def publish_request_body(compare):
+    """What the publish request says about itself.
+
+    Written from the comparison rather than from the change just accepted, so it
+    describes the drafts area as it stands — the whole of it, whoever wrote it.
+    """
+    compare = compare if isinstance(compare, dict) else {}
+    files = [f for f in (compare.get("files") or []) if isinstance(f, dict)]
+    commits = [c for c in (compare.get("commits") or []) if isinstance(c, dict)]
+
+    out = [PUBLISH_INTRO]
+
+    if files:
+        out.append("")
+        out.append(f"**Pages this would change ({len(files)})**")
+        out.append("")
+        for f in files[:MAX_LISTED]:
+            out.append(
+                f"- `{f.get('filename', '')}` — "
+                f"{int(f.get('additions') or 0)} added, "
+                f"{int(f.get('deletions') or 0)} removed"
+            )
+        if len(files) > MAX_LISTED:
+            out.append(f"- …and {len(files) - MAX_LISTED} more")
+
+    if commits:
+        out.append("")
+        out.append(f"**What is in the drafts area ({len(commits)})**")
+        out.append("")
+        for c in commits[-MAX_LISTED:]:
+            out.append(f"- {_commit_line(c)}")
+        if len(commits) > MAX_LISTED:
+            out.append(f"- …and {len(commits) - MAX_LISTED} older")
+
+    out.append("")
+    out.append(PUBLISH_FOOTER)
+    return "\n".join(out)
+
+
+def _commit_line(commit):
+    """One line of the drafts area: what was done, and by whom."""
+    body = (commit.get("commit") or {}).get("message") or ""
+    subject = body.split("\n")[0].strip() or "an untitled change"
+    return f"{subject} — {_commit_author(commit)}"
+
+
+def _commit_author(commit):
+    author = commit.get("author") or {}
+    if author.get("login"):
+        return author["login"]
+    named = ((commit.get("commit") or {}).get("author") or {}).get("name")
+    return named or "someone"
+
+
+# What each state means for the author, said without the vocabulary underneath.
+# "unknown" is a real answer and is given as one: the tool does not claim a
+# change can be published when it has not been told so.
+PUBLISH_STATE_WORDS = {
+    "clean": (
+        "This can go to readers now. Nothing else is waiting on it."
+    ),
+    "conflict": (
+        "This cannot be published as it stands: the same wording has been "
+        "changed both in the drafts area and in the live book, and the tool "
+        "will not choose between them. Nothing was lost and nothing has been "
+        "undone — open it in your browser to settle which wording wins, or "
+        "publish your own copy from Obsidian first and check back here."
+    ),
+    "blocked": (
+        "This is waiting on the book's own checks before it can go to readers. "
+        "That usually takes a few minutes; press “Check again” shortly."
+    ),
+    "unknown": (
+        "Whether this can go to readers is still being worked out. It is safely "
+        "in the drafts area either way — press “Check again” in a moment."
+    ),
+}
+
+
+def describe_publish(pr, compare, state):
+    """The publish request, in the author's vocabulary."""
+    compare = compare if isinstance(compare, dict) else {}
+    files = [f for f in (compare.get("files") or []) if isinstance(f, dict)]
+    commits = [c for c in (compare.get("commits") or []) if isinstance(c, dict)]
+
+    who = []
+    for c in commits:
+        name = _commit_author(c)
+        if name not in who:
+            who.append(name)
+
+    return {
+        "number": pr.get("number"),
+        "url": pr.get("html_url", ""),
+        "when": pr.get("created_at"),
+        "pages": [_page_name(f.get("filename", "")) for f in files],
+        "page_count": len(files),
+        "change_count": len(commits),
+        "who": who,
+        "state": state,
+        "state_words": PUBLISH_STATE_WORDS.get(state,
+                                               PUBLISH_STATE_WORDS["unknown"]),
+        "can_publish": state == "clean",
+    }

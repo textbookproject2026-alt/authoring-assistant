@@ -263,13 +263,44 @@ waits for you.
 Open one and you see, in ordinary before/after form, what wording they are
 proposing to change. Then:
 
-- **Accept this change** — it goes into the drafts area. It still is not live: it
-  reaches readers when you next publish from Obsidian.
+- **Accept this change** — it is folded into the drafts area, and the drafts are
+  put in line for the live book. It has still reached no reader: sending it there
+  is a separate press, under "Going live" below.
 - **Decline it** — it is closed.
 - **Open in my browser** — for anything large or unusual.
 
 If a change is too big to read comfortably here, the tool says so and offers the
 browser instead of printing a wall of text at you.
+
+### Going live
+
+Underneath the two lists is **Going live**: everything you have accepted, waiting
+in one place. The drafts area is shared — anything written in the browser editor
+is in there too — so what you see here is all of it together, and all of it is
+what goes to readers.
+
+Open it and you are shown how many changes there are, which pages they touch and
+who wrote them. Tick the box and press **Publish to the live book**.
+
+Three things are worth knowing.
+
+**The tool never publishes on its own.** Accepting a change puts it in line and
+stops there. Nothing reaches a reader until you press that button — because what
+would go includes other people's work as well as the change you just accepted,
+and you should see it before it goes.
+
+**The site takes a few minutes to catch up.** It rebuilds itself after you
+publish; readers see the change once it has.
+
+**Your vault will be behind afterwards.** Publishing writes to the live book, and
+your vault does not know about it. Take the latest into Obsidian before you write
+there again, or your copy and the live book will disagree with each other.
+
+If the same wording has been changed both in the drafts area and in the live book
+— usually because you edited that line in Obsidian too — the tool says so plainly
+and refuses to guess which one wins. Nothing is lost and nothing is undone. Sort
+it out in your browser, or publish your own copy from Obsidian first and then
+press **Check again**.
 
 ### The weekly jobs
 
@@ -291,8 +322,8 @@ Both open in your browser and are read-only.
 ### If you are not online
 
 The list will tell you plainly that it could not be fetched. **Nothing can be
-accepted or declined while you are offline** — the tool will not pretend to have
-done something it has not. Everything under Chapters keeps working exactly as
+accepted, declined or published while you are offline** — the tool will not
+pretend to have done something it has not. Everything under Chapters keeps working exactly as
 normal, because none of it needs the internet.
 
 ---

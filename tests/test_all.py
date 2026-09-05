@@ -763,6 +763,196 @@ _prate = _github._http_problem(_FakeHTTPError(403, "API rate limit exceeded"))
 check("being rate limited is told apart from being refused",
       "slow down" in _prate.message.lower(), _prate.message)
 
+# --- accepting reaches the live book, and stops one press short of it -------
+#
+# Accepting used to leave a change in the drafts area and tell the author it
+# would go live "when you next publish", which was not true of anything: the
+# vault tracks the live book and nothing moved the drafts across. Accepting now
+# also opens the one pull request that carries the drafts to the live book — and
+# deliberately does not merge it.
+
+from app import server as _server  # noqa: E402
+
+_COMPARE = {
+    "ahead_by": 2,
+    "files": [
+        {"filename": "chapters/chapter-03.md", "additions": 2, "deletions": 1},
+        {"filename": "chapters/chapter-09.md", "additions": 4, "deletions": 0},
+    ],
+    "commits": [
+        {"commit": {"message": "Fix a typo in chapter 3\n\nlonger body",
+                    "author": {"name": "Ada L"}},
+         "author": {"login": "ada"}},
+        # Written in the browser CMS, never seen by this console.
+        {"commit": {"message": "Update chapter-09.md",
+                    "author": {"name": "Textbook CMS"}},
+         "author": None},
+    ],
+}
+
+
+class _Service:
+    """Enough of the service to drive the accept path without a network."""
+
+    def __init__(self, mergeable=True, state="clean", ahead=2):
+        self.calls = []
+        self.open_prs = []
+        self.mergeable = mergeable
+        self.state = state
+        self.ahead = ahead
+        self.merged = []
+
+    def request(self, method, url, token=None, payload=None, accept=None):
+        self.calls.append((method, url, payload))
+        if "/compare/" in url:
+            return dict(_COMPARE, ahead_by=self.ahead)
+        if method == "PUT" and url.endswith("/merge"):
+            number = url.split("/pulls/")[1].split("/")[0]
+            self.merged.append(number)
+            return {"merged": True, "sha": "0" * 40}
+        if method == "GET" and "/pulls?state=open" in url:
+            return list(self.open_prs)
+        if method == "POST" and url.endswith("/pulls"):
+            pr = {"number": 77, "html_url": "https://example.invalid/77",
+                  "created_at": "2026-09-01T00:00:00Z",
+                  "title": payload["title"], "body": payload["body"]}
+            self.open_prs.append(pr)
+            return pr
+        if method == "PATCH" and "/pulls/" in url:
+            self.open_prs[0].update(payload)
+            return self.open_prs[0]
+        if method == "GET" and "/pulls/" in url:
+            return {"number": 77, "mergeable": self.mergeable,
+                    "mergeable_state": self.state}
+        return {}
+
+
+def _with_service(service, fn):
+    real_request, real_token = _github._request, _server._token
+    _github._request = service.request
+    _server._token = lambda: "a-token"
+    try:
+        return fn()
+    finally:
+        _github._request = real_request
+        _server._token = real_token
+
+
+def _posts(service):
+    return [c for c in service.calls if c[0] == "POST" and c[1].endswith("/pulls")]
+
+
+_svc = _Service()
+_r1 = _with_service(_svc, lambda: _server.r_console_draft_accept(
+    None, {"number": 5, "title": "Fix a typo in chapter 3"}))
+
+check("accepting still folds the change into the drafts area, squashed",
+      ("PUT", f"{_github.API}/repos/{_github.OWNER}/{_github.REPO}/pulls/5/merge",
+       {"merge_method": "squash", "commit_title": "Fix a typo in chapter 3"})
+      in _svc.calls)
+check("accepting then opens the one pull request to the live book",
+      len(_posts(_svc)) == 1 and _posts(_svc)[0][2]["head"] == "drafts"
+      and _posts(_svc)[0][2]["base"] == "main",
+      _posts(_svc))
+check("accepting does NOT merge that pull request itself",
+      _svc.merged == ["5"], _svc.merged)
+check("what the author is told no longer claims publishing from Obsidian does it",
+      not any("publish from Obsidian" in t or "when you next publish" in t
+              for t in _r1["steps"]), _r1["steps"])
+check("the author is told plainly that readers have not seen it yet",
+      any("Nothing has reached readers yet" in t for t in _r1["steps"]),
+      _r1["steps"])
+check("accepting hands back what is now waiting to go live",
+      _r1["publish"]["number"] == 77 and _r1["publish"]["can_publish"] is True,
+      _r1["publish"])
+
+# A second accept must join the request already open, not open a rival one.
+_r2 = _with_service(_svc, lambda: _server.r_console_draft_accept(
+    None, {"number": 6, "title": "Another change"}))
+check("a second accept updates the open pull request instead of opening another",
+      len(_posts(_svc)) == 1 and
+      any(c[0] == "PATCH" and "/pulls/77" in c[1] for c in _svc.calls),
+      len(_posts(_svc)))
+check("the second accept says it joined what was already in line",
+      any("joined the changes already in line" in t for t in _r2["steps"]),
+      _r2["steps"])
+
+# The description has to describe the drafts area as it stands, which includes
+# work this console never saw.
+_body = _svc.open_prs[0]["body"]
+check("the pull request describes the drafts area as a whole, not one change",
+      "chapters/chapter-03.md" in _body and "chapters/chapter-09.md" in _body,
+      _body)
+check("work written in the browser editor is named in it too",
+      "Textbook CMS" in _body and "browser editor" in _body, _body)
+check("the pull request says merging it is what publishes it",
+      "Merging this is what publishes it" in _body, _body)
+
+# A clash between the drafts and the live book is said out loud, not swallowed.
+_clash = _Service(mergeable=False, state="dirty")
+_r3 = _with_service(_clash, lambda: _server.r_console_draft_accept(
+    None, {"number": 7, "title": "A clashing change"}))
+check("a clash with the live book is surfaced rather than failing silently",
+      "cannot be published as it stands" in (_r3["warning"] or ""), _r3["warning"])
+check("a clash still leaves the change safe in the drafts area",
+      _r3["publish"]["can_publish"] is False and
+      any("folded into the drafts area" in t for t in _r3["steps"]), _r3["steps"])
+
+# "Not known yet" is a real answer and is given as one.
+_unsure = _Service(mergeable=None, state="unknown")
+_state_unknown = _with_service(
+    _unsure, lambda: _github.mergeability("t", 77, tries=1))
+check("an unsettled pull request is reported as unknown, never as fine",
+      _state_unknown == "unknown", _state_unknown)
+check("an unknown state does not offer to publish",
+      _console.describe_publish({"number": 77}, _COMPARE,
+                                "unknown")["can_publish"] is False)
+
+# Publishing is its own deliberate press.
+_pub = _Service()
+_pub.open_prs.append({"number": 77, "html_url": "u",
+                      "created_at": "2026-09-01T00:00:00Z"})
+_refused = None
+try:
+    _with_service(_pub, lambda: _server.r_console_publish(None, {"number": 77}))
+except KeyError as e:
+    _refused = str(e.args[0])
+check("publishing without ticking the box is refused",
+      _refused is not None and "tick the box" in _refused, _refused)
+check("nothing was merged when it was refused", _pub.merged == [], _pub.merged)
+
+_wrong = None
+try:
+    _with_service(_pub, lambda: _server.r_console_publish(
+        None, {"number": 999, "confirm": True}))
+except KeyError as e:
+    _wrong = str(e.args[0])
+check("publishing anything but the request the author was shown is refused",
+      _wrong is not None and "has changed since this screen" in _wrong, _wrong)
+check("and nothing was merged when it was refused", _pub.merged == [], _pub.merged)
+
+_done = _with_service(_pub, lambda: _server.r_console_publish(
+    None, {"number": 77, "confirm": True}))
+check("publishing merges the drafts into the live book once confirmed",
+      _pub.merged == ["77"], _pub.merged)
+check("the author is told his vault does not know about it yet",
+      any("vault does not know" in t for t in _done["steps"]), _done["steps"])
+
+# The drafts branch is long-lived and carries the CMS's work as well, so it has
+# to stay an ancestor of the live book. A squash here would offer everything
+# again on the next accept.
+with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "app", "github.py"), encoding="utf-8") as fh:
+    _gh_source = fh.read()
+check("the drafts reach the live book as a merge commit, not a squash",
+      '"merge_method": "merge"' in _gh_source and
+      "ancestor of `main`" in _gh_source)
+
+check("nothing waiting to go live means no pull request is opened",
+      _with_service(_Service(ahead=0),
+                    lambda: _server._publish_state("t")) == (None, None))
+
+
 check("the scope asked for excludes the author's private work",
       _github.SCOPE == "public_repo", _github.SCOPE)
 check("all four weekly jobs are known to the console",

@@ -24,6 +24,14 @@ import urllib.request
 OWNER = "textbookproject2026-alt"
 REPO = "textbook"
 
+# The two branches the console cares about. Everything proposed — a
+# contributor's change accepted here, or a draft written in the browser CMS —
+# lands on `drafts`. `main` is what readers see. Nothing reaches `main` except
+# through a pull request from `drafts`, which is the only door and is the door
+# the console now opens.
+DRAFTS_BRANCH = "drafts"
+LIVE_BRANCH = "main"
+
 API = "https://api.github.com"
 DEVICE_CODE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -119,6 +127,11 @@ def _http_problem(e):
         return Problem(
             "That change could not be applied cleanly. Open it in your browser "
             "to look at it."
+        )
+    if code == 405:
+        return Problem(
+            "That could not be merged as it stands, and nothing was changed. "
+            "Open it in your browser to see what is holding it up."
         )
     if code == 422:
         return Problem(
@@ -314,7 +327,13 @@ def drop_label(token, number, label):
 
 
 def accept_change(token, number, title):
-    """Fold a proposed change into the drafts area."""
+    """Fold a proposed change into the drafts area.
+
+    Squashed, so one accepted change is one commit on `drafts` however many
+    times its author saved while writing it. This puts the change in the drafts
+    area and nowhere else; getting it from there to readers is the job of the
+    publish request below.
+    """
     return _request(
         "PUT",
         f"{API}/repos/{OWNER}/{REPO}/pulls/{number}/merge",
@@ -329,4 +348,108 @@ def close_change(token, number):
         f"{API}/repos/{OWNER}/{REPO}/pulls/{number}",
         token=token,
         payload={"state": "closed"},
+    )
+
+
+
+# --- the one door from the drafts area to the live book ----------------------
+#
+# `drafts` is long-lived and shared: an accepted change lands there, and so does
+# every draft written in the browser CMS. So there is exactly one pull request
+# from `drafts` into `main` at a time, and it carries whatever `drafts` holds at
+# the moment it is looked at — not one change in isolation. Accepting reopens or
+# refreshes that one request rather than opening a second.
+
+def open_publish_request(token):
+    """The pull request carrying the drafts to the live book, if one is open.
+
+    Returns the pull request, None if there is none open, or a Problem.
+    """
+    url = (f"{API}/repos/{OWNER}/{REPO}/pulls?state=open"
+           f"&base={urllib.parse.quote(LIVE_BRANCH)}"
+           f"&head={urllib.parse.quote(OWNER + ':' + DRAFTS_BRANCH)}&per_page=10")
+    result = _request("GET", url, token=token)
+    if isinstance(result, Problem):
+        return result
+    for pr in result:
+        if isinstance(pr, dict):
+            return pr
+    return None
+
+
+def drafts_ahead_of_live(token):
+    """What the drafts area holds that the live book does not.
+
+    The reply carries `ahead_by`, the commits and the files, which is everything
+    needed to describe the publish request truthfully.
+    """
+    url = (f"{API}/repos/{OWNER}/{REPO}/compare/"
+           f"{urllib.parse.quote(LIVE_BRANCH)}...{urllib.parse.quote(DRAFTS_BRANCH)}")
+    return _request("GET", url, token=token)
+
+
+def create_publish_request(token, title, body):
+    return _request(
+        "POST",
+        f"{API}/repos/{OWNER}/{REPO}/pulls",
+        token=token,
+        payload={"title": title, "body": body,
+                 "head": DRAFTS_BRANCH, "base": LIVE_BRANCH},
+    )
+
+
+def update_publish_request(token, number, title, body):
+    return _request(
+        "PATCH",
+        f"{API}/repos/{OWNER}/{REPO}/pulls/{number}",
+        token=token,
+        payload={"title": title, "body": body},
+    )
+
+
+# What the service calls the state of a pull request, and whether that means it
+# can be merged. Anything not listed is treated as "not known", never as "fine".
+_BLOCKED_STATES = ("blocked", "draft")
+
+
+def mergeability(token, number, tries=1, pause=1.5):
+    """Whether a pull request can be merged as it stands.
+
+    The service works this out in the background, so for a moment after a pull
+    request is opened or changed the only honest answer is that it is not known
+    yet; `tries` says how long to wait for a real one.
+
+    Returns "clean", "conflict", "blocked" or "unknown". It never guesses: a
+    request whose state has not been worked out comes back as "unknown", and the
+    author is told that rather than told it is fine.
+    """
+    for attempt in range(max(1, tries)):
+        pr = _request("GET", f"{API}/repos/{OWNER}/{REPO}/pulls/{number}",
+                      token=token)
+        if isinstance(pr, Problem):
+            return "unknown"
+        mergeable = pr.get("mergeable")
+        if mergeable is False:
+            return "conflict"
+        if mergeable is True:
+            state = pr.get("mergeable_state") or ""
+            return "blocked" if state in _BLOCKED_STATES else "clean"
+        if attempt + 1 < tries:
+            time.sleep(pause)
+    return "unknown"
+
+
+def publish(token, number, title):
+    """Merge the drafts into the live book.
+
+    A merge commit, not a squash. `drafts` is long-lived, so it has to stay an
+    ancestor of `main`: squashing would rewrite the same work under a new commit
+    and leave `drafts` looking as though everything it had ever carried were
+    still unpublished, offering all of it again on the next accept.
+    """
+    return _request(
+        "PUT",
+        f"{API}/repos/{OWNER}/{REPO}/pulls/{number}/merge",
+        token=token,
+        payload={"merge_method": "merge", "commit_title": title},
     )

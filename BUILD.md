@@ -322,6 +322,28 @@ untouched-lines guarantee holds. Everything else is handed to the author with th
 suggestion pinned beside it. See the tests under "The console" in
 `tests/test_all.py`.
 
+**It does not publish by itself.** Accepting a proposed change folds it into
+`drafts` and then opens — or refreshes — the single pull request from `drafts`
+into `main`, so the change is on its way to readers rather than stranded. It
+stops one press short of merging that request, for three reasons. `drafts` is
+shared: it carries whatever has been written in the Sveltia CMS as well as
+whatever the console has accepted, so merging on the strength of one press about
+one change would publish other people's unreviewed work. `main` is protected and
+has checks of its own, which a desktop app is in no position to wait for. And the
+author's vault tracks `main`, so writing there behind his back would leave his own
+copy silently out of date and set up the next conflict. Publishing is therefore
+its own screen, showing what would go, with a box to tick — and it says
+afterwards that the vault now needs pulling.
+
+There is exactly one publish request at a time and its description is **rewritten**
+on each accept, never appended to, because what it carries is `drafts` as it
+stands and not the change just accepted. It merges with `merge_method: "merge"`,
+not `squash`: `drafts` is long-lived, so it has to stay an ancestor of `main`, or
+every accept would offer the whole of its history again. Whether it can be merged
+is read from the service and reported as `clean`, `conflict`, `blocked` or
+`unknown` — never guessed, and `unknown` is shown to the author as unknown. See
+"accepting reaches the live book" in `tests/test_all.py`.
+
 **It does not auto-merge the weekly generated pull requests.** The three
 generator workflows (`contributors.yml`, `derivatives.yml`, `dashboard.yml`) open
 PRs into protected `main`. Merging them from a desktop app would make the merge
@@ -334,12 +356,13 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 143 checks: the analyses, the file-safety promises,
+python3 -m tests.test_all     # 166 checks: the analyses, the file-safety promises,
                               #             the Word conversion, the console's
-                              #             refusal rules, and the words the
-                              #             troubleshooting guide quotes
-node tests/ui_flow.js         # 45 checks: the review and import flows, driven
-                              #            against the real app.js
+                              #             refusal rules, the path from accepting
+                              #             a change to the live book, and the
+                              #             words the troubleshooting guide quotes
+node tests/ui_flow.js         # 55 checks: the review, import and going-live
+                              #            flows, driven against the real app.js
 ```
 
 The Python suite covers the things that must never break: that untouched lines

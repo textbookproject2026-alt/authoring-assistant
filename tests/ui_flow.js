@@ -31,7 +31,9 @@ ids.forEach(i => els[i] = mkEl(i));
 const steps = ['step-choose','step-chapter','step-options','step-working','step-review',
                'step-preview','step-done','step-stopped',
                'step-import','step-import-setup','step-import-preview',
-               'step-import-done'];
+               'step-import-done',
+               'step-console','step-suggestion','step-draft','step-publish',
+               'step-console-done'];
 steps.forEach(s => els[s].classList.add('step'));
 
 const groupSpans = [mkEl('grp1'), mkEl('grp2')];
@@ -132,6 +134,26 @@ const fetch = async (route, opts) => {
       folder: '/v/Chapters',
     },
     '/api/import/cancel': { ok: true },
+
+    '/api/console/status': { configured: true, signed_in: true, who: 'The Author',
+                             keychain: true, root: null, root_name: null },
+    '/api/console/load': {
+      who: 'The Author', suggestions: [], drafts: [], weekly: [],
+      problems: [], offline: false,
+      publish: {
+        open: true, waiting: false, number: 77,
+        url: 'https://example.invalid/77', when: '2026-09-01T00:00:00Z',
+        pages: ['chapter-03', 'chapter-09'], page_count: 2, change_count: 2,
+        who: ['ada', 'Textbook CMS'], state: 'clean',
+        state_words: 'This can go to readers now. Nothing else is waiting on it.',
+        can_publish: true,
+      },
+    },
+    '/api/console/publish': { done: true, steps: [
+      'The drafts were sent to the live book.',
+      'The site rebuilds itself from there, which takes a few minutes. Readers see the change once it has.',
+      'Your vault does not know about this yet. Take the latest into Obsidian before you write there again, or your copy and the live book will disagree with each other.',
+    ] },
     '/api/open': {
       session_id: 'S1', mode: 'file', root: '/v', root_name: 'v',
       chapters: [{ path: '/v/Chapters/Chapter 6.md', rel: 'Chapter 6.md',
@@ -338,6 +360,50 @@ function check(name, cond, got) {
         calls.includes('/api/open') && calls.includes('/api/prepare'), calls);
   check('and it lands on the options screen, ready to be looked through',
         !els['step-options'].classList.contains('hidden'), 'wrong screen');
+
+  // --- the console: accepting is not publishing ------------------------------
+
+  await ctx.document.getElementById('go-console').onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('the console shows what is waiting',
+        !els['step-console'].classList.contains('hidden'), 'wrong screen');
+  check('what has been accepted but not sent is shown under "Going live"',
+        !els['publish-block'].classList.contains('hidden'),
+        'the going-live block was hidden');
+  check('it counts as waiting on the author, so the tab is not shown as empty',
+        els['waiting-count'].textContent === '1' &&
+        els['console-empty'].classList.contains('hidden'),
+        els['waiting-count'].textContent);
+
+  await els['publish-list'].children[0].children[0].onclick();
+  check('opening it shows what would go to readers',
+        !els['step-publish'].classList.contains('hidden'), 'wrong screen');
+  // Everything written onto the screen, cards and their lines alike.
+  const words = n => [n.textContent, ...n.children.map(words)].join(' ');
+  const pubText = words(els['publish-body']);
+  check('it says plainly that the whole drafts area goes, not one change',
+        pubText.includes('whole of the drafts area'), pubText);
+  check('it names the pages that would change',
+        pubText.includes('chapter-03'), pubText);
+  check('it names everyone whose work would go, including the browser editor',
+        pubText.includes('Textbook CMS'), pubText);
+
+  let refused = '';
+  els['error-text'].textContent = '';
+  await els['publish-go'].onclick();
+  refused = els['error-text'].textContent;
+  check('publishing is refused until the author ticks the box',
+        refused.includes('tick the box') && !calls.includes('/api/console/publish'),
+        refused);
+
+  els['publish-confirm'].checked = true;
+  await els['publish-go'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('ticking the box sends the drafts to the live book',
+        calls.includes('/api/console/publish'), calls);
+  check('afterwards the author is told his vault is now behind',
+        els['cdone-steps'].children.some(c => c.textContent.includes('vault does not know')),
+        els['cdone-steps'].children.map(c => c.textContent));
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

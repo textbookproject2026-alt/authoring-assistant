@@ -866,6 +866,7 @@ const C = {
   suggestion: null,
   plan: null,
   draft: null,
+  publish: null,
   poll: null,
 };
 
@@ -1018,9 +1019,13 @@ function renderConsole() {
 
   const sugs = d.suggestions || [];
   const drafts = d.drafts || [];
-  setWaitingCount(sugs.length + drafts.length);
+  // Something accepted but not yet sent to readers is still waiting on the
+  // author, so it counts as waiting and the "nothing is waiting" line stays
+  // away while it does.
+  const pub = d.publish || null;
+  setWaitingCount(sugs.length + drafts.length + (pub ? 1 : 0));
   document.getElementById('console-empty').classList.toggle(
-    'hidden', !!(sugs.length || drafts.length || (d.problems || []).length));
+    'hidden', !!(sugs.length || drafts.length || pub || (d.problems || []).length));
 
   document.getElementById('suggestions-count').textContent =
     sugs.length ? '(' + sugs.length + ')' : '(none)';
@@ -1053,6 +1058,25 @@ function renderConsole() {
     dl.appendChild(li);
   });
   if (!drafts.length) dl.appendChild(el('li', 'none', 'Nothing waiting.'));
+
+  C.publish = pub;
+  document.getElementById('publish-block').classList.toggle('hidden', !pub);
+  const pl = document.getElementById('publish-list');
+  pl.innerHTML = '';
+  if (pub) {
+    document.getElementById('publish-count').textContent =
+      '(' + (pub.change_count || 0) + ')';
+    const li = el('li');
+    const b = el('button');
+    b.appendChild(el('strong', '', publishHeadline(pub)));
+    if (pub.who && pub.who.length) {
+      b.appendChild(el('span', 'who', 'from ' + pub.who.join(', ')));
+    }
+    b.appendChild(el('span', 'snip', pub.state_words || ''));
+    b.onclick = () => openPublish(pub);
+    li.appendChild(b);
+    pl.appendChild(li);
+  }
 
   const wl = document.getElementById('weekly-list');
   wl.innerHTML = '';
@@ -1238,7 +1262,7 @@ document.getElementById('draft-accept').onclick = async () => {
   btn.disabled = true;
   try {
     const r = await api('/api/console/draft-accept', { number: x.number, title: x.title });
-    consoleDone('Accepted', r.steps);
+    consoleDone('Accepted', r.steps, r.warning);
   } catch (e) { fail(e.message); } finally { btn.disabled = false; }
 };
 
@@ -1253,13 +1277,111 @@ document.getElementById('draft-decline').onclick = async () => {
   } catch (e) { fail(e.message); } finally { btn.disabled = false; }
 };
 
+/* --- going live --- */
+
+function publishHeadline(p) {
+  const c = p.change_count || 0, n = p.page_count || 0;
+  if (!c) return 'Nothing new is waiting to go to readers';
+  const changes = c === 1 ? '1 change' : c + ' changes';
+  const pages = n === 1 ? '1 page' : n + ' pages';
+  return n ? (changes + ' to ' + pages + ', waiting to go to readers')
+           : (changes + ' waiting to go to readers');
+}
+
+function openPublish(p) {
+  C.publish = p;
+  show('step-publish');
+  renderPublish(p);
+}
+
+function renderPublish(p) {
+  document.getElementById('publish-meta').textContent = p.open
+    ? ('In line since ' + when(p.when))
+    : 'Not in line for the live book yet';
+
+  const body = document.getElementById('publish-body');
+  body.innerHTML = '';
+
+  const card = el('div', 'card');
+  card.appendChild(el('p', 'card-label', 'What would go to readers'));
+  card.appendChild(el('p', '', publishHeadline(p) + '.'));
+  if (p.pages && p.pages.length) {
+    card.appendChild(el('p', 'quiet', p.pages.join(' · ')));
+  }
+  if (p.who && p.who.length) {
+    card.appendChild(el('p', 'quiet', 'Written by ' + p.who.join(', ') + '.'));
+  }
+  card.appendChild(el('p', 'quiet',
+    'This is the whole of the drafts area, not only the last thing you accepted — anything written in the browser editor goes with it.'));
+  body.appendChild(card);
+
+  const state = el('p', 'notice' + (p.state === 'conflict' ? ' bad' : ''));
+  state.textContent = p.state_words || '';
+  body.appendChild(state);
+
+  const go = document.getElementById('publish-go');
+  const prep = document.getElementById('publish-prepare');
+  prep.classList.toggle('hidden', !!p.open);
+  go.classList.toggle('hidden', !p.open);
+  go.disabled = !p.can_publish;
+  document.getElementById('publish-browser').classList.toggle('hidden', !p.url);
+
+  if (p.open && p.can_publish) {
+    const lab = el('label', 'check confirm');
+    const cb = el('input');
+    cb.type = 'checkbox'; cb.id = 'publish-confirm';
+    lab.appendChild(cb);
+    lab.appendChild(el('span', '',
+      'I have read what is above, and I want all of it to go to readers now. This cannot be taken back from here.'));
+    body.appendChild(lab);
+  }
+}
+
+document.getElementById('publish-back').onclick = () => show('step-console');
+document.getElementById('publish-browser').onclick = () => {
+  if (C.publish && C.publish.url) window.open(C.publish.url, '_blank', 'noopener');
+};
+
+document.getElementById('publish-prepare').onclick = async () => {
+  const btn = document.getElementById('publish-prepare');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/console/publish-prepare', {});
+    if (!r.publish) {
+      return consoleDone('Nothing to send',
+        ['The live book already has everything in the drafts area.']);
+    }
+    C.publish = r.publish;
+    renderPublish(r.publish);
+  } catch (e) { fail(e.message); } finally { btn.disabled = false; }
+};
+
+document.getElementById('publish-go').onclick = async () => {
+  const p = C.publish;
+  if (!p || !p.number) return;
+  const cb = document.getElementById('publish-confirm');
+  if (!cb || !cb.checked) {
+    return fail('Please tick the box to confirm before publishing.');
+  }
+  const btn = document.getElementById('publish-go');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/console/publish', { number: p.number, confirm: true });
+    C.publish = null;
+    consoleDone('Sent to the live book', r.steps);
+  } catch (e) { fail(e.message); } finally { btn.disabled = false; }
+};
+
 /* --- afterwards --- */
 
-function consoleDone(title, steps) {
+function consoleDone(title, steps, warning) {
   document.getElementById('cdone-title').textContent = title;
   const list = document.getElementById('cdone-steps');
   list.innerHTML = '';
-  (steps || []).forEach(t => list.appendChild(el('li', '', t)));
+  (steps || []).filter(t => t).forEach(t => list.appendChild(el('li', '', t)));
+  const warn = document.getElementById('cdone-warning');
+  warn.textContent = warning || '';
+  warn.classList.toggle('hidden', !warning);
   show('step-console-done');
 }
 document.getElementById('cdone-back').onclick = loadConsole;

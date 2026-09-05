@@ -422,9 +422,18 @@
   <div id="drafts-block">
     <h3>Draft changes <span class="count" id="drafts-count"></span></h3>
     <p class="quiet">Written by trusted contributors in the browser editor.
-    Nothing here has reached readers — accepting puts it in the drafts area, and
-    it goes live when you next publish from Obsidian.</p>
+    Nothing here has reached readers. Accepting folds it into the drafts area
+    and puts it in line for the live book; sending it there is a separate press,
+    under “Going live” below.</p>
     <ul class="queue" id="drafts-list"></ul>
+  </div>
+
+  <div id="publish-block" class="hidden">
+    <h3>Going live <span class="count" id="publish-count"></span></h3>
+    <p class="quiet">Everything you have accepted, together with anything
+    written in the browser editor, gathered in one place. It goes to readers
+    when you send it, and not before.</p>
+    <ul class="queue" id="publish-list"></ul>
   </div>
 
   <h3>The weekly jobs</h3>
@@ -488,10 +497,25 @@
   </div>
 </section>
 
-<!-- C5. what just happened -->
+<!-- C5. sending the drafts to the live book -->
+<section id="step-publish" class="step hidden">
+  <h2>Send the drafts to the live book</h2>
+  <p class="quiet" id="publish-meta"></p>
+  <div id="publish-body"><div class="spinner"></div></div>
+
+  <div class="actions">
+    <button class="yes" id="publish-go">Publish to the live book</button>
+    <button id="publish-prepare">Put it in line</button>
+    <button class="link" id="publish-browser">Open in my browser</button>
+    <button class="link" id="publish-back">Back to the list</button>
+  </div>
+</section>
+
+<!-- C6. what just happened -->
 <section id="step-console-done" class="step hidden">
   <h2 id="cdone-title">Done</h2>
   <ul class="summary-list" id="cdone-steps"></ul>
+  <p class="notice bad hidden" id="cdone-warning"></p>
   <div class="actions">
     <button class="primary" id="cdone-back">Back to what is waiting</button>
   </div>
