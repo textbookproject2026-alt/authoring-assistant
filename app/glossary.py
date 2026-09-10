@@ -338,7 +338,11 @@ def plan_glossary(glossary_path, new_entries, source_name=""):
         added_ranges.append((len(out), len(out) + len(block), term))
         out.extend(block)
 
-    while len(out) > 1 and not out[-1].strip() and not out[-2].strip():
+    # Entry blocks end in a blank line so entries are separated, but the file
+    # itself must end with one newline after the last content line, or
+    # markdownlint's MD012 flags the blank line an entry sorting last leaves
+    # behind - and it would come back on the next append.
+    while out and not out[-1].strip():
         out.pop()
-    new_text = join_lines(out, newline, trailing if exists else True)
+    new_text = join_lines(out, newline, True)
     return original, new_text, added_ranges, out, newline, trailing

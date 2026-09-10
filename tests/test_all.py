@@ -213,6 +213,28 @@ check("an existing glossary entry is not duplicated", heads.count("Beta") == 1)
 check("existing glossary wording is left alone", "Second letter." in after)
 check("a new entry is added at the end when it sorts last", heads[-1] == "Zulu")
 
+# An entry that sorts last used to leave a blank line before the end of the file,
+# which markdownlint's MD012 flags - and tidying the file by hand did not help,
+# because the next entry to sort last put it straight back.
+with open(gpath, "w") as fh:
+    fh.write("# Glossary\n\n## Beta\n\nSecond letter.\n")
+_, after_last, _, _, _, _ = glossary.plan_glossary(gpath, [("Zulu", "last letter")])
+with open(gpath, "w") as fh:
+    fh.write(after_last)
+with open(gpath) as fh:
+    written = fh.read()
+check("a glossary ending on a last-sorting entry ends with one newline",
+      written.endswith("\n") and not written.endswith("\n\n"),
+      f"ends {written[-20:]!r}")
+check("entries are still separated by a blank line",
+      "\n\n## Zulu\n\n" in written, f"got {written!r}")
+
+# The same must hold when a last-sorting entry is appended to that tidy file.
+_, after_again, _, _, _, _ = glossary.plan_glossary(gpath, [("Zeta", "sixth letter")])
+check("the blank line does not come back on the next append",
+      after_again.endswith("\n") and not after_again.endswith("\n\n"),
+      f"ends {after_again[-20:]!r}")
+
 # --- 12. single-file mode ---------------------------------------------------
 
 solo = Session(chapter)
