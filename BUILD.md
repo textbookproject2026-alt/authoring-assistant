@@ -281,8 +281,8 @@ At <https://github.com/settings/developers> → **New OAuth App**:
 | Field | Value |
 |---|---|
 | Application name | `Textbook Author Console` — the author sees this name when approving, and again in their list of authorised apps, so it must be recognisable |
-| Homepage URL | `https://bptext2026.xyz` |
-| Authorization callback URL | `https://bptext2026.xyz` (required by the form; device flow never uses it) |
+| Homepage URL | `https://confused4now.org` |
+| Authorization callback URL | `https://confused4now.org` (required by the form; device flow never uses it) |
 | Enable Device Flow | **ticked** — without this, sign-in fails with `incorrect_client_credentials` |
 
 Then copy the **Client ID**. It is not a secret; it identifies the application to

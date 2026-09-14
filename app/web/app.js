@@ -857,7 +857,7 @@ window.addEventListener('pagehide', () => {
 /* The second half of the app: what readers and contributors have sent, shown
    without any of the vocabulary of the service it comes from. */
 
-const SITE = 'https://bptext2026.xyz';
+const SITE = 'https://confused4now.org';
 const DISCUSSION_URL = 'https://hypothes.is/search?q=url:' + SITE + '/*';
 const HISTORY_URL = 'https://github.com/textbookproject2026-alt/textbook/commits/main';
 
