@@ -19,6 +19,7 @@ import os
 import re
 
 from . import github
+from .registry import within
 from .edits import Edit, apply_edits
 from .mdmap import DocMap
 
@@ -133,6 +134,7 @@ def plan_change(vault_root, path, suggestion_text):
     out = {
         "can_apply": False,
         "reason": "",
+        "vault": vault_root or "",
         "file_path": "",
         "old": "",
         "new": "",
@@ -150,6 +152,14 @@ def plan_change(vault_root, path, suggestion_text):
         return out
 
     full = os.path.join(vault_root, path) if (vault_root and path) else ""
+    # The page is named by whoever filed the suggestion. A name that leads out
+    # of the vault ("../", a link to somewhere else) is never followed.
+    if full and not within(vault_root, full):
+        out["reason"] = (
+            "This suggestion names a page outside the folder you opened, so "
+            "the tool will not touch it."
+        )
+        return out
     if not full or not os.path.isfile(full):
         out["reason"] = (
             f"The page “{_page_name(path)}” is not in the folder you "
@@ -209,6 +219,11 @@ def apply_change(plan):
     full = plan.get("file_path")
     if not plan.get("can_apply") or not full:
         return False, "There is nothing that can be applied automatically."
+    if not plan.get("vault") or not within(plan["vault"], full):
+        return False, (
+            "That page is no longer inside the folder the change was worked "
+            "out for, so nothing was saved."
+        )
 
     try:
         with open(full, "r", encoding="utf-8") as fh:

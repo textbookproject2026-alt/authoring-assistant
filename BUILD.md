@@ -74,6 +74,7 @@ All read from the environment; nothing is hardcoded.
 | `BUILD_NUMBER` | a timestamp | `CFBundleVersion` |
 | `PYTHON_VERSION` | `3.12` | the interpreter bundled |
 | `PANDOC_VERSION` | the latest release | e.g. `3.11`; pin it to keep builds reproducible |
+| `REGISTRY_URL` | the registry's `registry.json` on `main` | the list of textbooks bundled as the offline fallback; see "Which book" below |
 | `ARCH` | this machine's | `arm64` or `x86_64` |
 | `NOTARY_PROFILE` | — | keychain profile, the easiest option |
 | `NOTARY_APPLE_ID` / `NOTARY_TEAM_ID` / `NOTARY_PASSWORD` | — | alternative to the profile |
@@ -291,12 +292,53 @@ neither needs one nor has anywhere safe to keep one.
 
 ### Giving it to the author
 
-Open the app → **Settings** → **Signing in to see what is waiting** → paste the
-Client ID → **Save identifier**. It is stored in `state.json` under Application
-Support (not a secret, so not in the Keychain). Done once per Mac.
+Nothing to do: the Client ID is `platform.console_oauth_client_id` in the
+registry, which the app reads at launch. A value pasted in **Settings** →
+**Signing in to see what is waiting** (stored in `state.json`) still takes
+precedence, for testing a different OAuth App.
 
-Until it is set, the console shows a plain "the technical contact needs to set
-this up" screen rather than failing.
+If neither exists — no registry copy at all and nothing pasted — the console
+shows a plain "the technical contact needs to set this up" screen rather than
+failing.
+
+## Which book (the registry)
+
+No book's repository, branches or site is written into the app. They come from
+`textbook-registry/registry.json` (see `platform-registry-design/DESIGN.md` §3d):
+
+- **Fetched once per launch** from the registry's `main`
+  (`app/registry.py`, `REGISTRY_URL`; `AA_REGISTRY_URL` overrides it for
+  development). A good copy is saved to `registry.json` in Application Support.
+  If the fetch fails, the saved copy is used, then the copy the build bundled
+  (`app/registry.bundled.json`, fetched by `build.sh`, never committed). The page
+  says "List of textbooks as of …" whenever the copy isn't fresh. A list that
+  arrives broken never replaces a good saved one.
+- **The list is checked again on arrival**: duplicate keys, slugs or repos, an
+  unknown `schema_version`, or drafts branch = live branch all refuse the whole
+  list. A retired or unknown slug never resolves, and nothing falls back to
+  another book.
+- **Book picker.** `GET /repos/{repo}` per non-retired book, with the author's own
+  token. Only books where `permissions` has push, maintain or admin are offered
+  (a private repo is never offered, since `public_repo` can't reach it). The
+  answer is saved per account in `state.json` for offline use, and cleared on
+  sign-out. The last choice is remembered as `last_book`.
+- **The vault decides.** One vault is open for the whole app, whichever half
+  opened it. Opening it reads `textbook.config.json`'s `slug` and the
+  `origin` remote in `.git/config` (worktrees followed; host ignored, since the
+  maintainer uses an SSH alias), and both must match one registered book, or
+  the vault is refused. An open vault sets the book and locks the picker.
+- **The write is what enforces it.** Before a suggestion is written into a
+  chapter, `_guard_book_write` re-reads the vault's identity from disk and
+  refuses unless it is unchanged since opening, is still the book the suggestion
+  was fetched from, and is the vault the change was planned in. The Chapters
+  tools' saves go through `_guard_vault_write` (the target is inside the open
+  vault, and the vault's claim is unchanged and still holds). A suggestion's page
+  path is resolved with links and `..` followed, and refused if it leaves the
+  vault.
+- **Every console request names its book.** The page sends the slug it was drawn
+  for, and the server refuses any request whose slug isn't the current book, so
+  a stale tab can't act on the wrong one. The suggestion text used for a plan is
+  the one the server fetched for that book, not what the page sends.
 
 ### The scope, and why it is narrow
 
@@ -381,13 +423,16 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 166 checks: the analyses, the file-safety promises,
+python3 -m tests.test_all     # 279 checks: the analyses, the file-safety promises,
                               #             the Word conversion, the console's
                               #             refusal rules, the path from accepting
-                              #             a change to the live book, and the
+                              #             a change to the live book, the
+                              #             registry, the book picker, the vault
+                              #             and book mismatch refusals, and the
                               #             words the troubleshooting guide quotes
-node tests/ui_flow.js         # 55 checks: the review, import and going-live
-                              #            flows, driven against the real app.js
+node tests/ui_flow.js         # 79 checks: the review, import, book-choosing and
+                              #            going-live flows, driven against the
+                              #            real app.js
 ```
 
 The Python suite covers the things that must never break: that untouched lines

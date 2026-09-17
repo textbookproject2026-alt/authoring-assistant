@@ -15,3 +15,6 @@ __pycache__/
 # Build output
 build/
 dist/
+
+# The list of textbooks is fetched into the app at build time, never committed.
+app/registry.bundled.json

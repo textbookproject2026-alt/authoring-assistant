@@ -16,7 +16,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import config, console, convert, github, keychain, llm, picker
+from . import config, console, convert, github, keychain, llm, picker, registry
 from .session import Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -251,10 +251,17 @@ def r_open(handler, data):
             "folder that holds your .md chapter files."
         )
 
+    # Opening a chapter opens its vault for the whole app, and the vault
+    # decides the book. A vault that claims a book it can't be shown to be is
+    # refused here, before any work is done in it.
+    ident = _open_vault(session.root)
+
     sid = secrets.token_urlsafe(12)
     with LOCK:
         SESSIONS[sid] = session
     return {
+        "workspace": _workspace_info(),
+        "vault": _vault_info(ident),
         "session_id": sid,
         "mode": session.mode,
         "root": session.root,
@@ -320,6 +327,7 @@ def r_preview(handler, data):
 
 def r_commit(handler, data):
     session = handler._session(data)
+    _guard_vault_write(session.chapter_path, session.glossary_path)
     result = session.commit(data.get("accepted", []), data.get("expand_groups", []))
     return result
 
@@ -403,7 +411,9 @@ def r_import_pick_docx(handler, data):
 
 
 def r_import_pick_folder(handler, data):
-    start = IMPORT["folder"] or CONSOLE["root"] or os.path.expanduser("~")
+    ident = WORKSPACE["vault"]
+    start = IMPORT["folder"] or (ident["root"] if ident else None) \
+        or os.path.expanduser("~")
     path, err = picker.choose_folder(
         "Choose where in your vault the converted chapter should go", start
     )
@@ -412,8 +422,13 @@ def r_import_pick_folder(handler, data):
     if not path:
         return {"cancelled": True}
     folder = path.rstrip("/")
-    if convert.find_vault_root(folder) is None:
+    top = convert.find_vault_root(folder)
+    if top is None:
         return {"error": convert.vault_problem(folder)}
+    try:
+        _open_vault(top)
+    except KeyError as e:
+        return {"error": str(e.args[0])}
     IMPORT["folder"] = folder
     return {"folder": folder,
             "folder_name": os.path.basename(folder) or folder,
@@ -465,6 +480,10 @@ def r_import_save(handler, data):
         raise KeyError("There is nothing converted to save. Please start again.")
 
     media_rel = result.get("media_rel")
+    _guard_vault_write(
+        os.path.join(IMPORT["folder"], os.path.basename(result["md_name"])),
+        result.get("media_target"),
+    )
     chapter_path, media_path = convert.save(result, IMPORT["folder"])
     _forget_import()
     IMPORT["last_saved"] = chapter_path
@@ -487,6 +506,330 @@ def r_quit(handler, data):
     return {"stopping": True}
 
 
+# --- which book, and which vault ---------------------------------------------
+#
+# Everything the console shows or does belongs to one book, and the author is
+# never left to wonder which. There is one vault open at a time for the whole
+# app, whichever half opened it, and when a vault is open IT decides the book:
+# the book picker follows it and cannot be moved away from it. With no vault
+# open the author picks a book from the list of books they can act on, and can
+# read and reply, but not change a chapter.
+#
+# The picker being locked is what makes the dangerous mix — a suggestion for
+# one book written into another book's chapter — impossible to reach through the
+# interface. It is not what makes it impossible. That is done at the moment of
+# writing, by reading the vault's identity from disk again and refusing unless
+# it is still the book the text came from (see _guard_book_write). A screen
+# drawn for another book, a vault whose settings changed after it was opened,
+# or a second tab all fail there, and nothing is written.
+
+WORKSPACE = {
+    "vault": None,       # registry.identify() of the open vault, or None
+    "book": None,        # slug of the book being worked on, or None
+    "restored": False,   # whether the last choice has been brought back yet
+}
+
+
+def _registry():
+    """The list of books, or None. Never raises."""
+    try:
+        return registry.get()
+    except registry.RegistryError:
+        return None
+
+
+def _current_book():
+    """The Book being worked on, or None."""
+    slug = WORKSPACE["book"]
+    reg = _registry()
+    if not slug or reg is None:
+        return None
+    return reg.find(slug)
+
+
+def _forget_book_work():
+    """Anything worked out for one book or vault is useless for another."""
+    CONSOLE["plans"].clear()
+    CONSOLE["loaded"] = None
+
+
+def _set_book(slug, remember=True):
+    if slug != WORKSPACE["book"]:
+        _forget_book_work()
+    WORKSPACE["book"] = slug
+    if slug and remember:
+        config.write_state(last_book=slug)
+
+
+def _restore_last_book():
+    """Bring back the book chosen last time, once, if nothing else decided it."""
+    if WORKSPACE["restored"]:
+        return
+    WORKSPACE["restored"] = True
+    if WORKSPACE["book"] or WORKSPACE["vault"]:
+        return
+    slug = config.read_state().get("last_book")
+    reg = _registry()
+    if not slug or reg is None or reg.find(slug) is None:
+        return
+    if _known_access(slug) in ("read", "none"):
+        return   # no longer theirs to act on; let them choose again
+    WORKSPACE["book"] = slug
+
+
+def _open_vault(path):
+    """Make this the app's vault, and let it decide the book.
+
+    Refuses — raises KeyError, and changes nothing — when the vault names a
+    book and that claim does not hold up. Returns the vault's identity.
+    """
+    ident = registry.identify(registry.vault_root(path))
+    if ident["state"] in registry.FAILED_CLAIMS:
+        raise KeyError(ident["message"])
+    WORKSPACE["restored"] = True
+    WORKSPACE["vault"] = ident
+    # A vault always decides: a linked vault sets its book, and a vault that
+    # isn't linked (or can't be checked) leaves no book chosen at all, so the
+    # console cannot show one book beside another book's vault.
+    _set_book(ident["book"].slug if ident["book"] else None)
+    CONSOLE["plans"].clear()
+    return ident
+
+
+def _vault_info(ident):
+    if not ident:
+        return None
+    return {k: ident[k] for k in ("root", "name", "slug", "remote", "state",
+                                  "message")}
+
+
+def _workspace_info():
+    """Everything the page needs to say which book and vault are in use."""
+    _restore_last_book()
+    try:
+        reg = registry.get()
+        reg_info = reg.describe()
+    except registry.RegistryError as e:
+        reg = None
+        reg_info = {"source": None, "fresh": False, "as_of": None,
+                    "problem": str(e)}
+    book = _current_book()
+    ident = WORKSPACE["vault"]
+    info = None
+    if book is not None:
+        info = book.describe()
+        info["access"] = _known_access(book.slug) or "unknown"
+    return {
+        "registry": reg_info,
+        "book": info,
+        "vault": _vault_info(ident),
+        # With a vault open, the vault decides the book.
+        "locked": ident is not None,
+        # Whether the console may change a chapter in the open vault.
+        "can_write_vault": bool(ident and book and ident["state"] == registry.OK
+                                and ident["book"].slug == book.slug),
+    }
+
+
+def _guard_book_write(book, plan):
+    """Refuse unless the open vault, read again now, is `book`'s vault.
+
+    Used before a suggestion's text is written into a chapter. The text came
+    from `book`'s repository, so it may only go into `book`'s vault. Raises
+    KeyError, having written nothing, when that cannot be shown to be so.
+    """
+    ident = WORKSPACE["vault"]
+    if ident is None:
+        raise KeyError(
+            "No vault is open, so no chapter can be changed. Nothing was done."
+        )
+    fresh = registry.identify(ident["root"])
+    if fresh["key"] != ident["key"]:
+        raise KeyError(
+            f"The settings in “{ident['name']}” changed after it was opened, so "
+            "it can't be trusted to be the same book. Nothing was done. Open "
+            "the vault again."
+        )
+    if fresh["state"] != registry.OK:
+        raise KeyError(fresh["message"] + " Nothing was done.")
+    if fresh["book"].slug != book.slug:
+        raise KeyError(
+            f"This suggestion is for “{book.title}”, but the vault that is open, "
+            f"“{ident['name']}”, is “{fresh['book'].title}”. Nothing was written."
+        )
+    if plan.get("book") != book.slug or plan.get("vault") != ident["root"]:
+        raise KeyError(
+            "This change was worked out for a different book or vault. Nothing "
+            "was done. Please look at the suggestion again."
+        )
+
+
+def _guard_vault_write(*targets):
+    """Refuse unless every target is inside the open vault, and the vault is
+    still what it said it was when it was opened.
+
+    Used before the Chapters tools write. Their text comes from the vault
+    itself, not from any book, so a vault that isn't linked to a book is fine;
+    a vault whose claim to be a book fails is not. Raises RuntimeError.
+    """
+    ident = WORKSPACE["vault"]
+    if ident is None:
+        raise RuntimeError(
+            "The vault was closed after this was opened, so nothing was saved. "
+            "Please start again."
+        )
+    for target in targets:
+        if target and not registry.within(ident["root"], target):
+            raise RuntimeError(
+                f"The app has moved on to a different vault (“{ident['name']}”) "
+                "since this was opened, so nothing was saved. Please open the "
+                "chapter again."
+            )
+    fresh = registry.identify(ident["root"])
+    if fresh["key"] != ident["key"]:
+        raise RuntimeError(
+            f"The settings in “{ident['name']}” changed after it was opened, so "
+            "nothing was saved. Please open it again."
+        )
+    if fresh["state"] in registry.FAILED_CLAIMS:
+        raise RuntimeError(fresh["message"] + " Nothing was saved.")
+    book = WORKSPACE["book"]
+    if fresh["state"] == registry.OK and fresh["book"].slug != book:
+        raise RuntimeError(
+            f"“{ident['name']}” is “{fresh['book'].title}”, but the app is set "
+            "to a different book. Nothing was saved."
+        )
+
+
+def r_workspace(handler, data):
+    return _workspace_info()
+
+
+def r_vault_close(handler, data):
+    """Close the vault. The book stays chosen; changing chapters stops."""
+    WORKSPACE["vault"] = None
+    CONSOLE["plans"].clear()
+    return _workspace_info()
+
+
+def _known_access(slug):
+    """What this Mac last learned about the author's access to a book."""
+    if slug in CONSOLE["access"]:
+        return CONSOLE["access"][slug]
+    saved = config.read_state().get("book_access") or {}
+    if CONSOLE["login"] and saved.get("login") != CONSOLE["login"]:
+        return None
+    return (saved.get("access") or {}).get(slug)
+
+
+def _check_access(token, books):
+    """Ask which of these books the author can act on. (checked, problem)."""
+    problem = None
+    for book in books:
+        level = github.repo_access(token, book)
+        if isinstance(level, github.Problem):
+            if level.needs_signin:
+                _unwrap(level)
+            problem = level
+            continue
+        CONSOLE["access"][book.slug] = level
+    if CONSOLE["access"]:
+        saved = config.read_state().get("book_access") or {}
+        access = dict(saved.get("access") or {}) \
+            if saved.get("login") == CONSOLE["login"] else {}
+        access.update(CONSOLE["access"])
+        config.write_state(book_access={
+            "login": CONSOLE["login"], "checked_at": time.time(),
+            "access": access,
+        })
+    return problem
+
+
+def _ensure_login(token):
+    if CONSOLE["login"] is None:
+        who = github.whoami(token)
+        if isinstance(who, github.Problem):
+            if who.needs_signin:
+                _unwrap(who)
+            return who
+        CONSOLE["who"], CONSOLE["login"] = who["name"], who["login"]
+    return None
+
+
+def r_books(handler, data):
+    """The books the signed-in author can act on.
+
+    Checked against their own access to each book's repository, so a book they
+    cannot change is never offered and then refused later.
+    """
+    token = _token()
+    if not token:
+        _needs_signin()
+    registry.retry_if_unavailable()
+    try:
+        reg = registry.get()
+    except registry.RegistryError as e:
+        raise KeyError(str(e))
+
+    books = reg.active()
+    offline = False
+    note = ""
+    problem = _ensure_login(token)
+    if problem is None:
+        problem = _check_access(token, books)
+    if problem is not None:
+        offline = problem.offline
+        saved = config.read_state().get("book_access") or {}
+        when = saved.get("checked_at")
+        note = (
+            ("This Mac is not online, so " if offline else
+             "Access could not be checked just now, so ")
+            + ("this is who could make changes as of "
+               + time.strftime("%-d %B %Y", time.localtime(when)) + "."
+               if when else "it isn't known yet which books you can change.")
+        )
+
+    shown, hidden = [], 0
+    for book in books:
+        level = _known_access(book.slug)
+        if level == "write":
+            item = book.describe()
+            item["access"] = level
+            shown.append(item)
+        else:
+            hidden += 1
+    return {
+        "books": shown,
+        "hidden": hidden,
+        "offline": offline,
+        "note": note,
+        "workspace": _workspace_info(),
+    }
+
+
+def r_books_choose(handler, data):
+    slug = (data.get("slug") or "").strip()
+    ident = WORKSPACE["vault"]
+    if ident is not None:
+        if ident["book"] is not None and ident["book"].slug == slug:
+            return _workspace_info()
+        raise KeyError(
+            f"The vault you have open, “{ident['name']}”, decides which book you "
+            "are working on. Close the vault first to choose a different book."
+        )
+    try:
+        book = registry.get().resolve(slug)
+    except registry.RegistryError as e:
+        raise KeyError(str(e))
+    if _known_access(book.slug) != "write":
+        raise KeyError(
+            f"Your account can't make changes to “{book.title}” ({book.repo}), "
+            "so it can't be chosen here."
+        )
+    _set_book(book.slug)
+    return _workspace_info()
+
+
 # --- the console -------------------------------------------------------------
 #
 # Everything below serves the second half of the app: the readable layer over the
@@ -494,15 +837,22 @@ def r_quit(handler, data):
 # service, and never has to open it.
 
 CONSOLE = {
-    "root": None,     # the vault folder, needed only to apply a change
     "who": None,      # who is signed in, remembered so we don't ask every time
+    "login": None,    # their account name, which the access record is kept under
     "signin": None,   # the sign-in attempt in progress
-    "plans": {},      # suggestion number -> the change worked out for it
+    "access": {},     # book slug -> "write", "read" or "none", checked this run
+    "loaded": None,   # the suggestions last shown: {"slug", "suggestions"}
+    "plans": {},      # (book slug, suggestion number) -> the change worked out
 }
 
 
 def _client_id():
-    return (config.read_state().get("github_client_id") or "").strip()
+    """The sign-in identifier: one pasted in Settings, else the registry's."""
+    saved = (config.read_state().get("github_client_id") or "").strip()
+    if saved:
+        return saved
+    reg = _registry()
+    return reg.client_id if reg is not None else ""
 
 
 def _token():
@@ -518,20 +868,55 @@ def _unwrap(result):
     if isinstance(result, github.Problem):
         if result.needs_signin:
             CONSOLE["who"] = None
+            CONSOLE["login"] = None
         raise KeyError(result.message)
     return result
 
 
+def _book_for(data):
+    """The book a console request is about, and only if it is the current one.
+
+    The page says which book it was showing. A page drawn for one book must
+    never act on another, so a disagreement stops the request here.
+    """
+    book = _current_book()
+    if book is None:
+        raise KeyError(
+            "No book is chosen, so nothing was done. Choose one at the top of "
+            "the page."
+        )
+    shown = data.get("book")
+    if shown != book.slug:
+        raise KeyError(
+            "This screen was drawn for a different book from the one the app is "
+            f"now working on (“{book.title}”), so nothing was done. Press "
+            "“Check again”."
+        )
+    return book
+
+
+def _require_write(book):
+    if _known_access(book.slug) in ("read", "none"):
+        raise KeyError(
+            f"Your account can't make changes to “{book.title}” ({book.repo}), "
+            "so nothing was done. The book's maintainer can give you access."
+        )
+
+
 def r_console_status(handler, data):
-    """Enough for the console to decide what to draw. Makes no network calls."""
+    """Enough for the console to decide what to draw.
+
+    Makes no calls to the service behind the console. The list of books is
+    fetched once per run, the first time anything needs it.
+    """
+    client = _client_id()
     return {
-        "configured": bool(_client_id()),
-        "client_hint": _client_id()[:8] if _client_id() else "",
+        "configured": bool(client),
+        "client_hint": client[:8] if client else "",
         "signed_in": bool(_token()),
         "who": CONSOLE["who"],
         "keychain": keychain.available(),
-        "root": CONSOLE["root"],
-        "root_name": os.path.basename(CONSOLE["root"]) if CONSOLE["root"] else None,
+        "workspace": _workspace_info(),
     }
 
 
@@ -584,23 +969,31 @@ def r_console_signin_poll(handler, data):
             "allow the Keychain prompt if one appears."
         )
     CONSOLE["signin"] = None
+    CONSOLE["access"] = {}
     who = github.whoami(token)
     if isinstance(who, github.Problem):
         CONSOLE["who"] = None
+        CONSOLE["login"] = None
         raise KeyError(who.message)
-    CONSOLE["who"] = who["name"]
+    CONSOLE["who"], CONSOLE["login"] = who["name"], who["login"]
     return {"signed_in": True, "who": who["name"]}
 
 
 def r_console_signout(handler, data):
     keychain.delete(keychain.ACCOUNT_GITHUB)
     CONSOLE["who"] = None
+    CONSOLE["login"] = None
     CONSOLE["signin"] = None
+    CONSOLE["access"] = {}
+    _forget_book_work()
+    # What one account could change says nothing about the next one.
+    config.write_state(book_access=None)
     return {"signed_in": False}
 
 
 def r_console_pick_vault(handler, data):
-    start = CONSOLE["root"] or os.path.expanduser("~")
+    ident = WORKSPACE["vault"]
+    start = ident["root"] if ident else os.path.expanduser("~")
     path, err = picker.choose_folder(
         "Choose your vault folder (the folder holding your chapters)", start
     )
@@ -608,13 +1001,15 @@ def r_console_pick_vault(handler, data):
         return {"error": err}
     if not path:
         return {"cancelled": True}
-    CONSOLE["root"] = path.rstrip("/")
-    return {"root": CONSOLE["root"],
-            "root_name": os.path.basename(CONSOLE["root"])}
+    try:
+        _open_vault(path.rstrip("/"))
+    except KeyError as e:
+        return {"error": str(e.args[0])}
+    return {"workspace": _workspace_info()}
 
 
 def r_console_load(handler, data):
-    """Everything waiting, in one call.
+    """Everything waiting for one book, in one call.
 
     Each part fails on its own: one thing being unavailable never blanks the
     rest of the screen.
@@ -622,66 +1017,98 @@ def r_console_load(handler, data):
     token = _token()
     if not token:
         _needs_signin()
+    book = _book_for(data)
 
     out = {"suggestions": [], "drafts": [], "weekly": [], "publish": None,
-           "problems": [], "offline": False}
+           "problems": [], "offline": False, "book": book.describe()}
 
-    if CONSOLE["who"] is None:
-        who = github.whoami(token)
-        if isinstance(who, github.Problem):
-            if who.needs_signin:
-                raise KeyError(who.message)
-            out["problems"].append(who.message)
-            out["offline"] = who.offline
-        else:
-            CONSOLE["who"] = who["name"]
+    who = _ensure_login(token)
+    if who is not None:
+        out["problems"].append(who.message)
+        out["offline"] = who.offline
     out["who"] = CONSOLE["who"]
 
-    issues = github.suggested_edits(token)
+    if book.slug not in CONSOLE["access"]:
+        _check_access(token, [book])
+    out["access"] = _known_access(book.slug) or "unknown"
+
+    issues = github.suggested_edits(token, book)
     if isinstance(issues, github.Problem):
         out["problems"].append("Suggestions: " + issues.message)
         out["offline"] = out["offline"] or issues.offline
     else:
-        out["suggestions"] = [console.parse_suggestion(i) for i in issues]
+        mine = [i for i in issues if github.from_book(i, book)]
+        if len(mine) != len(issues):
+            out["problems"].append(
+                "Suggestions: some came back from somewhere other than "
+                f"{book.repo} and were left out.")
+        out["suggestions"] = [console.parse_suggestion(i) for i in mine]
+        CONSOLE["loaded"] = {
+            "slug": book.slug,
+            "suggestions": {str(s["number"]): s for s in out["suggestions"]},
+        }
 
-    prs = github.draft_changes(token)
+    prs = github.draft_changes(token, book)
     if isinstance(prs, github.Problem):
         out["problems"].append("Draft changes: " + prs.message)
         out["offline"] = out["offline"] or prs.offline
     else:
-        out["drafts"] = [console.describe_change(p) for p in prs]
+        out["drafts"] = [console.describe_change(p) for p in prs
+                         if github.from_book(p, book)]
 
-    publish, publish_problem = _publish_state(token)
+    publish, publish_problem = _publish_state(token, book)
     if publish_problem is not None:
         out["problems"].append("Going live: " + publish_problem.message)
         out["offline"] = out["offline"] or publish_problem.offline
     else:
         out["publish"] = publish
 
-    weekly = github.weekly_status(token)
+    weekly = github.weekly_status(token, book)
     if isinstance(weekly, github.Problem):
         out["problems"].append("Weekly jobs: " + weekly.message)
         out["offline"] = out["offline"] or weekly.offline
     else:
         out["weekly"] = weekly
 
+    out["workspace"] = _workspace_info()
     return out
 
 
 def r_console_plan(handler, data):
-    """Work out, without changing anything, what accepting would do."""
-    number = data.get("number")
-    path = data.get("path") or ""
-    text = data.get("suggestion") or ""
-    plan = console.plan_change(CONSOLE["root"], path, text)
-    CONSOLE["plans"][str(number)] = plan
+    """Work out, without changing anything, what accepting would do.
+
+    The suggestion's page and wording are the ones this app fetched for this
+    book, not whatever the page sends back.
+    """
+    book = _book_for(data)
+    number = str(data.get("number"))
+    loaded = CONSOLE["loaded"] or {}
+    suggestion = (loaded.get("suggestions") or {}).get(number)
+    if loaded.get("slug") != book.slug or suggestion is None:
+        raise KeyError("That suggestion isn't in the list any more. Press "
+                       "“Check again”.")
+
+    ident = WORKSPACE["vault"]
+    info = _workspace_info()
+    if ident is not None and not info["can_write_vault"]:
+        plan = console.plan_change(None, suggestion["path"],
+                                   suggestion["suggestion"])
+        plan["reason"] = ident["message"] or (
+            f"The vault that is open isn't “{book.title}”, so the tool will not "
+            "change it.")
+    else:
+        root = ident["root"] if ident else None
+        plan = console.plan_change(root, suggestion["path"],
+                                   suggestion["suggestion"])
+    plan["book"] = book.slug
+    CONSOLE["plans"][(book.slug, number)] = plan
     return {
         "can_apply": plan["can_apply"],
         "reason": plan["reason"],
         "line_no": plan["line_no"],
         "before": plan["before"],
         "after": plan["after"],
-        "needs_vault": not CONSOLE["root"],
+        "needs_vault": ident is None,
     }
 
 
@@ -695,21 +1122,24 @@ def r_console_accept(handler, data):
     token = _token()
     if not token:
         _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
 
     number = data.get("number")
     apply_it = bool(data.get("apply"))
     steps = []
 
     if apply_it:
-        plan = CONSOLE["plans"].get(str(number))
+        plan = CONSOLE["plans"].get((book.slug, str(number)))
         if not plan:
             raise KeyError("Please look at the change again before accepting it.")
+        _guard_book_write(book, plan)
         ok, message = console.apply_change(plan)
         if not ok:
             raise KeyError(message)
         steps.append(message)
 
-    replied = github.comment(token, number, console.THANKS)
+    replied = github.comment(token, book, number, console.THANKS)
     if isinstance(replied, github.Problem):
         raise RuntimeError(
             (("The chapter was updated. " if apply_it else "") +
@@ -717,16 +1147,16 @@ def r_console_accept(handler, data):
         )
     steps.append("A thank-you was sent.")
 
-    github.drop_label(token, number, console.NEEDS_TRIAGE)
+    github.drop_label(token, book, number, console.NEEDS_TRIAGE)
 
-    closed = github.close_issue(token, number)
+    closed = github.close_issue(token, book, number)
     if isinstance(closed, github.Problem):
         raise RuntimeError(
             (("The chapter was updated and the thank-you was sent, but the "
               "suggestion could not be marked as dealt with: ") + closed.message)
         )
     steps.append("The suggestion was marked as dealt with.")
-    CONSOLE["plans"].pop(str(number), None)
+    CONSOLE["plans"].pop((book.slug, str(number)), None)
     return {"done": True, "steps": steps}
 
 
@@ -734,15 +1164,17 @@ def r_console_decline(handler, data):
     token = _token()
     if not token:
         _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
     number = data.get("number")
 
-    replied = github.comment(token, number, console.DECLINED)
+    replied = github.comment(token, book, number, console.DECLINED)
     if isinstance(replied, github.Problem):
         raise RuntimeError("The reply could not be sent: " + replied.message)
 
-    github.drop_label(token, number, console.NEEDS_TRIAGE)
+    github.drop_label(token, book, number, console.NEEDS_TRIAGE)
 
-    closed = github.close_issue(token, number)
+    closed = github.close_issue(token, book, number)
     if isinstance(closed, github.Problem):
         raise RuntimeError(
             "The reply was sent, but the suggestion could not be marked as "
@@ -771,16 +1203,16 @@ def r_console_decline(handler, data):
 # generated pull requests out of this app.
 
 
-def _publish_state(token, tries=1):
+def _publish_state(token, book, tries=1):
     """What stands between the drafts area and the live book.
 
     Reads; never opens or changes anything. Returns (info, problem). `info` is
     None when the live book already has everything the drafts area holds.
     """
-    compare = github.drafts_ahead_of_live(token)
+    compare = github.drafts_ahead_of_live(token, book)
     if isinstance(compare, github.Problem):
         return None, compare
-    existing = github.open_publish_request(token)
+    existing = github.open_publish_request(token, book)
     if isinstance(existing, github.Problem):
         return None, existing
 
@@ -804,14 +1236,14 @@ def _publish_state(token, tries=1):
             "can_publish": False,
         }, None
 
-    state = github.mergeability(token, existing.get("number"), tries=tries)
+    state = github.mergeability(token, book, existing.get("number"), tries=tries)
     info = console.describe_publish(existing, compare, state)
     info["open"] = True
     info["waiting"] = False
     return info, None
 
 
-def _open_or_refresh_publish_request(token):
+def _open_or_refresh_publish_request(token, book):
     """Make sure the one publish request is open and says what the drafts area
     now holds. Returns (info, problem).
 
@@ -819,10 +1251,10 @@ def _open_or_refresh_publish_request(token):
     to, because what it carries is the drafts area as it stands — including
     anything written in the browser editor — and not the change just accepted.
     """
-    compare = github.drafts_ahead_of_live(token)
+    compare = github.drafts_ahead_of_live(token, book)
     if isinstance(compare, github.Problem):
         return None, compare
-    existing = github.open_publish_request(token)
+    existing = github.open_publish_request(token, book)
     if isinstance(existing, github.Problem):
         return None, existing
 
@@ -832,7 +1264,7 @@ def _open_or_refresh_publish_request(token):
     body = console.publish_request_body(compare)
     if existing is not None:
         pr = github.update_publish_request(
-            token, existing.get("number"), console.PUBLISH_TITLE, body)
+            token, book, existing.get("number"), console.PUBLISH_TITLE, body)
         if isinstance(pr, github.Problem):
             # The request is open and carries the change whatever happens to
             # its description; only the description is now out of date, which
@@ -840,19 +1272,20 @@ def _open_or_refresh_publish_request(token):
             pr = existing
         opened = False
     else:
-        pr = github.create_publish_request(token, console.PUBLISH_TITLE, body)
+        pr = github.create_publish_request(token, book, console.PUBLISH_TITLE,
+                                           body)
         opened = True
         if isinstance(pr, github.Problem):
             # Another copy of the app, or the author on the web, may have opened
             # one in the moment between looking and asking.
-            again = github.open_publish_request(token)
+            again = github.open_publish_request(token, book)
             if isinstance(again, github.Problem) or again is None:
                 return None, pr
             pr, opened = again, False
 
     # Just opened or just changed, so the answer is not ready yet; wait a little
     # rather than report "not known" when a moment would settle it.
-    state = github.mergeability(token, pr.get("number"), tries=4)
+    state = github.mergeability(token, book, pr.get("number"), tries=4)
     info = console.describe_publish(pr, compare, state)
     info["open"] = True
     info["waiting"] = False
@@ -864,7 +1297,8 @@ def r_console_draft_detail(handler, data):
     token = _token()
     if not token:
         _needs_signin()
-    files = github.change_files(token, data.get("number"))
+    book = _book_for(data)
+    files = github.change_files(token, book, data.get("number"))
     if isinstance(files, github.Problem):
         raise KeyError(files.message)
     return console.readable_change(files)
@@ -884,16 +1318,18 @@ def r_console_draft_accept(handler, data):
     token = _token()
     if not token:
         _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
     number = data.get("number")
     title = data.get("title") or "Accepted draft change"
 
-    result = github.accept_change(token, number, title)
+    result = github.accept_change(token, book, number, title)
     if isinstance(result, github.Problem):
         raise RuntimeError(result.message)
 
     steps = ["The change was folded into the drafts area."]
 
-    info, problem = _open_or_refresh_publish_request(token)
+    info, problem = _open_or_refresh_publish_request(token, book)
     if problem is not None:
         return {
             "done": True,
@@ -938,7 +1374,9 @@ def r_console_publish_prepare(handler, data):
     token = _token()
     if not token:
         _needs_signin()
-    info, problem = _open_or_refresh_publish_request(token)
+    book = _book_for(data)
+    _require_write(book)
+    info, problem = _open_or_refresh_publish_request(token, book)
     if problem is not None:
         raise RuntimeError(problem.message)
     return {"publish": info}
@@ -953,6 +1391,8 @@ def r_console_publish(handler, data):
     token = _token()
     if not token:
         _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
     try:
         number = int(data.get("number") or 0)
     except (TypeError, ValueError):
@@ -964,7 +1404,7 @@ def r_console_publish(handler, data):
 
     # Only ever the one request the author was shown. A screen left open while
     # the drafts moved on must not merge something else into the live book.
-    existing = github.open_publish_request(token)
+    existing = github.open_publish_request(token, book)
     if isinstance(existing, github.Problem):
         raise RuntimeError(existing.message)
     if existing is None or int(existing.get("number") or 0) != number:
@@ -974,7 +1414,7 @@ def r_console_publish(handler, data):
             "it before publishing."
         )
 
-    result = github.publish(token, number, console.PUBLISH_TITLE)
+    result = github.publish(token, book, number, console.PUBLISH_TITLE)
     if isinstance(result, github.Problem):
         raise RuntimeError(result.message)
     if not result.get("merged"):
@@ -990,7 +1430,9 @@ def r_console_draft_decline(handler, data):
     token = _token()
     if not token:
         _needs_signin()
-    result = github.close_change(token, data.get("number"))
+    book = _book_for(data)
+    _require_write(book)
+    result = github.close_change(token, book, data.get("number"))
     if isinstance(result, github.Problem):
         raise RuntimeError(result.message)
     return {"done": True, "steps": ["The draft change was closed."]}
@@ -1019,6 +1461,11 @@ ROUTES = {
     "/api/import/convert": r_import_convert,
     "/api/import/save": r_import_save,
     "/api/import/cancel": r_import_cancel,
+
+    "/api/workspace": r_workspace,
+    "/api/vault/close": r_vault_close,
+    "/api/books": r_books,
+    "/api/books/choose": r_books_choose,
 
     "/api/console/status": r_console_status,
     "/api/console/save-client": r_console_save_client,
@@ -1081,6 +1528,9 @@ def main(argv=None):
     print(f"Authoring Assistant listening on {url}")
 
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    # Fetch the list of books now, so the first screen that needs it is not
+    # the one that waits for it.
+    threading.Thread(target=_registry, daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
     if not quiet:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()

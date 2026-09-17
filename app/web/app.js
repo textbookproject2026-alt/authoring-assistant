@@ -79,6 +79,7 @@ document.getElementById('pick-folder').onclick = () => pick('folder');
 
 async function openTarget(path) {
   const data = await api('/api/open', { path });
+  renderWorkspace(data.workspace);
   S.sessionId = data.session_id;
   S.root = data.root;
   S.chapters = data.chapters;
@@ -555,6 +556,7 @@ document.getElementById('choose-import-folder').onclick = async () => {
     const r = await api('/api/import/pick-folder', {});
     if (r.cancelled) return;
     if (r.error) return fail(r.error);
+    await refreshWorkspace();
     W.folder = r;
     document.getElementById('folder-chosen').textContent =
       r.folder + (r.chapters_here
@@ -857,10 +859,6 @@ window.addEventListener('pagehide', () => {
 /* The second half of the app: what readers and contributors have sent, shown
    without any of the vocabulary of the service it comes from. */
 
-const SITE = 'https://confused4now.org';
-const DISCUSSION_URL = 'https://hypothes.is/search?q=url:' + SITE + '/*';
-const HISTORY_URL = 'https://github.com/textbookproject2026-alt/textbook/commits/main';
-
 const C = {
   status: null,
   data: null,
@@ -870,6 +868,164 @@ const C = {
   publish: null,
   poll: null,
 };
+
+/* ---------- which book ---------- */
+/* Every queue, count and action in the console belongs to one book, and the
+   bar under the header always says which. When a vault is open it decides the
+   book, and the book cannot be changed without closing it first. Nothing about
+   a book is written here: its repository, branches and links all come from the
+   app, which takes them from the list of textbooks. */
+
+let WS = { book: null, vault: null, locked: false, can_write_vault: false, registry: {} };
+
+function bookSlug() { return WS.book ? WS.book.slug : null; }
+function bookName() { return WS.book ? WS.book.title : ''; }
+
+// Every console request says which book the screen was drawn for, and the app
+// refuses it if that is no longer the book it is working on.
+function bookApi(route, body) {
+  return api(route, Object.assign({ book: bookSlug() }, body || {}));
+}
+
+function renderWorkspace(ws) {
+  if (!ws) return;
+  const before = bookSlug();
+  WS = ws;
+
+  const bookEl = document.getElementById('bookbar-book');
+  bookEl.innerHTML = '';
+  if (ws.book) {
+    bookEl.appendChild(el('strong', '', ws.book.title));
+    bookEl.appendChild(el('span', 'bookbar-repo', ' · ' + ws.book.repo));
+    if (ws.book.access === 'read' || ws.book.access === 'none') {
+      bookEl.appendChild(el('span', 'bookbar-repo', ' · you can read this book but not change it'));
+    }
+  } else {
+    bookEl.textContent = 'No book chosen';
+  }
+
+  const vaultEl = document.getElementById('bookbar-vault');
+  const v = ws.vault;
+  vaultEl.textContent = v
+    ? (v.name + (ws.locked && ws.book ? ' — this vault decides the book' : ''))
+    : 'None open — chapters can’t be changed from “Waiting for you”';
+
+  const problem = document.getElementById('bookbar-problem');
+  const vaultProblem = v && v.state !== 'ok' ? v.message : '';
+  problem.textContent = vaultProblem;
+  problem.classList.toggle('hidden', !vaultProblem);
+
+  const reg = ws.registry || {};
+  const regEl = document.getElementById('bookbar-registry');
+  const regText = reg.source === null || reg.source === undefined
+    ? (reg.problem || '')
+    : (!reg.fresh ? 'List of textbooks as of ' + (reg.as_of || 'an earlier date') + '.' : '');
+  regEl.textContent = regText;
+  regEl.classList.toggle('hidden', !regText);
+
+  const change = document.getElementById('bookbar-change');
+  change.classList.toggle('hidden', !!ws.locked);
+  document.getElementById('bookbar-close').classList.toggle('hidden', !v);
+
+  // What was on screen belonged to the old book; never leave it showing.
+  if (before !== bookSlug()) {
+    C.data = null; C.suggestion = null; C.plan = null; C.draft = null; C.publish = null;
+    setWaitingCount(0);
+  }
+  ['console-book', 'sug-book', 'draft-book', 'publish-book'].forEach(id => {
+    document.getElementById(id).textContent = ws.book ? ('For ' + ws.book.title) : '';
+  });
+}
+
+async function refreshWorkspace() {
+  try { renderWorkspace(await api('/api/workspace', {})); } catch (e) { /* the bar keeps its last state */ }
+}
+
+function onConsoleScreen() {
+  return ['step-console', 'step-suggestion', 'step-draft', 'step-publish',
+          'step-console-done', 'step-books']
+    .some(id => !document.getElementById(id).classList.contains('hidden'));
+}
+
+async function openBookPicker() {
+  place('console');
+  stopPolling();
+  show('step-books');
+  const list = document.getElementById('books-list');
+  const note = document.getElementById('books-note');
+  const hidden = document.getElementById('books-hidden');
+  const locked = document.getElementById('books-locked');
+  list.innerHTML = '';
+  hidden.textContent = '';
+  note.classList.add('hidden');
+
+  locked.classList.toggle('hidden', !WS.locked);
+  if (WS.locked) {
+    document.getElementById('books-locked-text').textContent = WS.book
+      ? ('The vault you have open, “' + WS.vault.name + '”, is ' + WS.book.title +
+         ', so that is the book you are working on. To work on a different book, close the vault first.')
+      : (WS.vault.message + ' Close the vault to choose a book instead.');
+  }
+
+  list.appendChild(el('li', 'none', 'Checking which books you can work on…'));
+  let r;
+  try { r = await api('/api/books', {}); } catch (e) {
+    list.innerHTML = '';
+    return fail(e.message);
+  }
+  renderWorkspace(r.workspace);
+  list.innerHTML = '';
+  if (r.note) {
+    note.textContent = r.note;
+    note.classList.remove('hidden');
+  }
+  r.books.forEach(b => {
+    const li = el('li');
+    const btn = el('button');
+    btn.appendChild(el('strong', '', b.title));
+    btn.appendChild(el('span', 'who', b.repo + (b.status === 'preview' ? ' · not yet public' : '')));
+    if (WS.book && WS.book.slug === b.slug) btn.appendChild(el('span', 'snip', 'The book you are working on now.'));
+    btn.disabled = WS.locked && !(WS.book && WS.book.slug === b.slug);
+    btn.onclick = () => chooseBook(b.slug);
+    li.appendChild(btn);
+    list.appendChild(li);
+  });
+  if (!r.books.length) {
+    list.appendChild(el('li', 'none',
+      'Your account can’t make changes to any registered book. The book’s maintainer can give you access.'));
+  }
+  if (r.hidden) {
+    hidden.textContent = r.hidden === 1
+      ? '1 other book isn’t shown, because your account can’t make changes to it.'
+      : r.hidden + ' other books aren’t shown, because your account can’t make changes to them.';
+  }
+}
+
+async function chooseBook(slug) {
+  try {
+    renderWorkspace(await api('/api/books/choose', { slug }));
+  } catch (e) { return fail(e.message); }
+  await loadConsole();
+}
+
+document.getElementById('bookbar-change').onclick = enterBookPicker;
+document.getElementById('books-back').onclick = () => document.getElementById('go-chapters').click();
+
+async function closeVault() {
+  try { renderWorkspace(await api('/api/vault/close', {})); } catch (e) { return fail(e.message); }
+  if (onConsoleScreen()) await enterConsole();
+}
+document.getElementById('bookbar-close').onclick = closeVault;
+document.getElementById('books-close-vault').onclick = async () => {
+  try { renderWorkspace(await api('/api/vault/close', {})); } catch (e) { return fail(e.message); }
+  await openBookPicker();
+};
+
+// Choosing a book needs to know who is asking, so it goes through sign-in.
+async function enterBookPicker() {
+  await enterConsole({ picker: true });
+}
+
 
 function place(which) {
   document.getElementById('go-chapters').classList.toggle('active', which === 'chapters');
@@ -889,22 +1045,26 @@ function stopPolling() {
 
 /* --- getting in --- */
 
-async function enterConsole() {
+async function enterConsole(opts) {
   place('console');
   stopPolling();
   try {
     C.status = await api('/api/console/status', {});
   } catch (e) { return fail(e.message); }
+  renderWorkspace(C.status.workspace);
 
   if (!C.status.configured) return show('step-console-setup');
   if (!C.status.signed_in) {
     document.getElementById('signin-code-box').classList.add('hidden');
     return show('step-console-signin');
   }
+  // No book yet, or the author asked to change it: choose one first. The
+  // console never shows a queue without knowing whose it is.
+  if (!WS.book || (opts && opts.picker)) return openBookPicker();
   await loadConsole();
 }
 
-document.getElementById('go-console').onclick = enterConsole;
+document.getElementById('go-console').onclick = () => enterConsole();
 document.getElementById('go-chapters').onclick = () => {
   place('chapters');
   stopPolling();
@@ -957,6 +1117,7 @@ document.getElementById('console-signout').onclick = async () => {
   try { await api('/api/console/signout', {}); } catch (e) { /* signing out always succeeds locally */ }
   C.status = null; C.data = null;
   setWaitingCount(0);
+  await refreshWorkspace();
   await enterConsole();
 };
 
@@ -969,25 +1130,39 @@ function setWaitingCount(n) {
 }
 
 async function loadConsole() {
+  if (!WS.book) return openBookPicker();
   show('step-console');
   document.getElementById('console-who').textContent = 'Checking…';
+  // Emptied first, so the previous book's list is never on screen under this
+  // book's name while the new one loads.
+  C.data = null;
+  renderConsole();
+  document.getElementById('console-who').textContent = 'Checking…';
+  let data;
   try {
-    C.data = await api('/api/console/load', {});
+    data = await bookApi('/api/console/load', {});
   } catch (e) {
+    await refreshWorkspace();
     return fail(e.message);
   }
+  renderWorkspace(data.workspace);
+  if (!WS.book || data.book.slug !== WS.book.slug) return loadConsole();
+  C.data = data;
   renderConsole();
 }
 
-document.getElementById('console-refresh').onclick = loadConsole;
+document.getElementById('console-refresh').onclick = async () => {
+  await refreshWorkspace();
+  await loadConsole();
+};
 
 document.getElementById('console-vault').onclick = async () => {
   try {
     const r = await api('/api/console/pick-vault', {});
     if (r.cancelled) return;
     if (r.error) return fail(r.error);
-    C.status.root = r.root; C.status.root_name = r.root_name;
-    renderConsole();
+    renderWorkspace(r.workspace);
+    await enterConsole();
   } catch (e) { fail(e.message); }
 };
 
@@ -996,13 +1171,15 @@ function renderConsole() {
   document.getElementById('console-who').textContent =
     d.who ? ('Signed in as ' + d.who) : 'Signed in';
 
-  document.getElementById('link-discussion').href = DISCUSSION_URL;
-  document.getElementById('link-history').href = HISTORY_URL;
+  const book = WS.book || {};
+  document.getElementById('link-discussion').href = book.discussion_url || '#';
+  document.getElementById('discussion-item').classList.toggle('hidden', !book.discussion_url);
+  document.getElementById('link-history').href = book.history_url || '#';
 
   const vaultBtn = document.getElementById('console-vault');
-  vaultBtn.textContent = C.status && C.status.root_name
-    ? ('Chapters folder: ' + C.status.root_name + ' — change')
-    : 'Choose my chapters folder';
+  vaultBtn.textContent = WS.vault
+    ? ('Vault: ' + WS.vault.name + ' — choose another')
+    : ('Open the vault for ' + (book.title || 'this book'));
 
   // Anything that went wrong is said out loud rather than left as a blank list.
   const probs = document.getElementById('console-problems');
@@ -1110,9 +1287,7 @@ async function openSuggestion(s) {
   box.appendChild(el('p', 'quiet', 'Looking at your chapter…'));
 
   try {
-    C.plan = await api('/api/console/plan', {
-      number: s.number, path: s.path, suggestion: s.suggestion,
-    });
+    C.plan = await bookApi('/api/console/plan', { number: s.number });
   } catch (e) {
     box.innerHTML = '';
     box.appendChild(el('p', 'notice bad', e.message));
@@ -1145,7 +1320,9 @@ function renderPlan() {
     const cb = el('input');
     cb.type = 'checkbox'; cb.id = 'sug-apply'; cb.checked = true;
     lab.appendChild(cb);
-    lab.appendChild(el('span', '', 'Make this change to my chapter as well as replying.'));
+    lab.appendChild(el('span', '',
+      'Make this change to my chapter in “' + (WS.vault ? WS.vault.name : '') +
+      '” as well as replying.'));
     card.appendChild(lab);
     box.appendChild(card);
     return;
@@ -1156,7 +1333,7 @@ function renderPlan() {
   card.appendChild(el('p', '', p.reason));
   if (p.needs_vault) {
     card.appendChild(el('p', 'quiet',
-      'Choose your chapters folder at the bottom of the previous screen and the tool can check the wording for you.'));
+      'Open the vault for ' + bookName() + ' at the bottom of the previous screen and the tool can check the wording for you.'));
   } else {
     card.appendChild(el('p', 'quiet',
       'Accepting sends a thank-you and clears it from this list. Make the change yourself under Chapters.'));
@@ -1177,7 +1354,7 @@ document.getElementById('sug-accept').onclick = async () => {
   const btn = document.getElementById('sug-accept');
   btn.disabled = true;
   try {
-    const r = await api('/api/console/accept', { number: s.number, apply: applyIt });
+    const r = await bookApi('/api/console/accept', { number: s.number, apply: applyIt });
     consoleDone('Accepted', r.steps);
   } catch (e) {
     fail(e.message);
@@ -1190,7 +1367,7 @@ document.getElementById('sug-decline').onclick = async () => {
   const btn = document.getElementById('sug-decline');
   btn.disabled = true;
   try {
-    const r = await api('/api/console/decline', { number: s.number });
+    const r = await bookApi('/api/console/decline', { number: s.number });
     consoleDone('Declined, politely', r.steps);
   } catch (e) {
     fail(e.message);
@@ -1210,7 +1387,7 @@ async function openDraft(x) {
 
   let detail;
   try {
-    detail = await api('/api/console/draft-detail', { number: x.number });
+    detail = await bookApi('/api/console/draft-detail', { number: x.number });
   } catch (e) {
     body.innerHTML = '';
     body.appendChild(el('p', 'notice bad', e.message));
@@ -1262,7 +1439,7 @@ document.getElementById('draft-accept').onclick = async () => {
   const btn = document.getElementById('draft-accept');
   btn.disabled = true;
   try {
-    const r = await api('/api/console/draft-accept', { number: x.number, title: x.title });
+    const r = await bookApi('/api/console/draft-accept', { number: x.number, title: x.title });
     consoleDone('Accepted', r.steps, r.warning);
   } catch (e) { fail(e.message); } finally { btn.disabled = false; }
 };
@@ -1273,7 +1450,7 @@ document.getElementById('draft-decline').onclick = async () => {
   const btn = document.getElementById('draft-decline');
   btn.disabled = true;
   try {
-    const r = await api('/api/console/draft-decline', { number: x.number });
+    const r = await bookApi('/api/console/draft-decline', { number: x.number });
     consoleDone('Declined', r.steps);
   } catch (e) { fail(e.message); } finally { btn.disabled = false; }
 };
@@ -1333,7 +1510,8 @@ function renderPublish(p) {
     cb.type = 'checkbox'; cb.id = 'publish-confirm';
     lab.appendChild(cb);
     lab.appendChild(el('span', '',
-      'I have read what is above, and I want all of it to go to readers now. This cannot be taken back from here.'));
+      'I have read what is above, and I want all of it to go to readers of ' +
+      bookName() + ' now. This cannot be taken back from here.'));
     body.appendChild(lab);
   }
 }
@@ -1347,7 +1525,7 @@ document.getElementById('publish-prepare').onclick = async () => {
   const btn = document.getElementById('publish-prepare');
   btn.disabled = true;
   try {
-    const r = await api('/api/console/publish-prepare', {});
+    const r = await bookApi('/api/console/publish-prepare', {});
     if (!r.publish) {
       return consoleDone('Nothing to send',
         ['The live book already has everything in the drafts area.']);
@@ -1367,7 +1545,7 @@ document.getElementById('publish-go').onclick = async () => {
   const btn = document.getElementById('publish-go');
   btn.disabled = true;
   try {
-    const r = await api('/api/console/publish', { number: p.number, confirm: true });
+    const r = await bookApi('/api/console/publish', { number: p.number, confirm: true });
     C.publish = null;
     consoleDone('Sent to the live book', r.steps);
   } catch (e) { fail(e.message); } finally { btn.disabled = false; }
@@ -1403,6 +1581,7 @@ document.getElementById('welcome-settings').onclick = async () => {
 (async function boot() {
   startHeartbeat();
   await loadEnv();
+  await refreshWorkspace();
   refreshDeepseekOption();
   show(ENV.seen_welcome ? 'step-choose' : 'step-welcome');
 })();
