@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import json
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -749,9 +751,64 @@ shutil.rmtree(_wroot, ignore_errors=True)
 # The console: the readable layer over the place the textbook is stored.
 # ---------------------------------------------------------------------------
 
+from app import config as _config  # noqa: E402
 from app import console as _console  # noqa: E402
 from app import github as _github  # noqa: E402
 from app import keychain as _keychain  # noqa: E402
+from app import registry as _registry  # noqa: E402
+
+# Nothing in these checks may touch the real Keychain, the real folder
+# chooser, or the real Application Support folder.
+_FAKE_KEYCHAIN = {}
+_keychain.save = lambda account, secret: _FAKE_KEYCHAIN.update(
+    {account: secret}) or True
+_keychain.load = lambda account: _FAKE_KEYCHAIN.get(account)
+_keychain.delete = lambda account: _FAKE_KEYCHAIN.pop(account, None) or True
+from app import picker as _picker_mod  # noqa: E402
+
+
+def _no_chooser(*args, **kwargs):
+    raise AssertionError("a check tried to open the real folder chooser")
+
+
+_picker_mod.choose_folder = _no_chooser
+_picker_mod.choose_file = _no_chooser
+_picker_mod.choose_word_document = _no_chooser
+_support = tempfile.mkdtemp(prefix="aa-support-")
+_config.SUPPORT_DIR = _support
+_config.STATE_FILE = os.path.join(_support, "state.json")
+_registry.CACHE_FILE = os.path.join(_support, "registry.json")
+_registry.BUNDLED_FILE = os.path.join(_support, "no-bundled-copy.json")
+
+# A list of books like the registry's, with made-up repositories. The second
+# book uses different branch names, so nothing can pass by assuming
+# drafts/main.
+_REG_DATA = {
+    "schema_version": 1,
+    "platform": {"console_oauth_client_id": "Iv1.registry-client"},
+    "books": [
+        {"slug": "book-a", "status": "live", "title": "Book A",
+         "content": {"repo": "example-org/book-a", "live_branch": "main",
+                     "drafts_branch": "drafts"},
+         "site": {"domain": "book-a.example"}},
+        {"slug": "book-b", "status": "live", "title": "Book B",
+         "content": {"repo": "example-org/book-b", "live_branch": "published",
+                     "drafts_branch": "staging"},
+         "site": {"domain": "book-b.example"}},
+        {"slug": "book-c", "status": "preview", "title": "Book C",
+         "content": {"repo": "other-org/book-c", "live_branch": "main",
+                     "drafts_branch": "drafts"},
+         "site": {"domain": None}},
+        {"slug": "old-book", "status": "retired", "title": "Old Book",
+         "content": {"repo": "example-org/old-book", "live_branch": "main",
+                     "drafts_branch": "drafts"},
+         "site": {"domain": "old.example"}},
+    ],
+}
+_REG = _registry.Registry(json.loads(json.dumps(_REG_DATA)), "live", time.time())
+_registry.use(_REG)
+_BOOK = _REG.find("book-a")
+_BOOK_B = _REG.find("book-b")
 
 # --- reading a suggestion the form actually produces ---
 
@@ -911,8 +968,6 @@ class _FakeHTTPError(Exception):
     def read(self):
         return self._m
 
-import json  # noqa: E402
-
 _p401 = _github._http_problem(_FakeHTTPError(401))
 check("a rejected sign-in asks the author to sign in again",
       _p401.needs_signin is True and "sign in again" in _p401.message.lower(),
@@ -1002,16 +1057,30 @@ def _with_service(service, fn):
         _server._token = real_token
 
 
+def _on_book(book, vault=None, access="write"):
+    """Put the app where the author would be: this book, this vault."""
+    _server.WORKSPACE.update(vault=vault, book=book.slug if book else None,
+                             restored=True)
+    _server.CONSOLE.update(who="The Author", login="author", plans={},
+                           loaded=None, access={})
+    if book is not None and access:
+        _server.CONSOLE["access"][book.slug] = access
+
+
+_on_book(_BOOK)
+_A = {"book": "book-a"}
+
+
 def _posts(service):
     return [c for c in service.calls if c[0] == "POST" and c[1].endswith("/pulls")]
 
 
 _svc = _Service()
 _r1 = _with_service(_svc, lambda: _server.r_console_draft_accept(
-    None, {"number": 5, "title": "Fix a typo in chapter 3"}))
+    None, dict(_A, number=5, title="Fix a typo in chapter 3")))
 
 check("accepting still folds the change into the drafts area, squashed",
-      ("PUT", f"{_github.API}/repos/{_github.OWNER}/{_github.REPO}/pulls/5/merge",
+      ("PUT", f"{_github.API}/repos/{_BOOK.repo}/pulls/5/merge",
        {"merge_method": "squash", "commit_title": "Fix a typo in chapter 3"})
       in _svc.calls)
 check("accepting then opens the one pull request to the live book",
@@ -1032,7 +1101,7 @@ check("accepting hands back what is now waiting to go live",
 
 # A second accept must join the request already open, not open a rival one.
 _r2 = _with_service(_svc, lambda: _server.r_console_draft_accept(
-    None, {"number": 6, "title": "Another change"}))
+    None, dict(_A, number=6, title="Another change")))
 check("a second accept updates the open pull request instead of opening another",
       len(_posts(_svc)) == 1 and
       any(c[0] == "PATCH" and "/pulls/77" in c[1] for c in _svc.calls),
@@ -1055,7 +1124,7 @@ check("the pull request says merging it is what publishes it",
 # A clash between the drafts and the live book is said out loud, not swallowed.
 _clash = _Service(mergeable=False, state="dirty")
 _r3 = _with_service(_clash, lambda: _server.r_console_draft_accept(
-    None, {"number": 7, "title": "A clashing change"}))
+    None, dict(_A, number=7, title="A clashing change")))
 check("a clash with the live book is surfaced rather than failing silently",
       "cannot be published as it stands" in (_r3["warning"] or ""), _r3["warning"])
 check("a clash still leaves the change safe in the drafts area",
@@ -1065,7 +1134,7 @@ check("a clash still leaves the change safe in the drafts area",
 # "Not known yet" is a real answer and is given as one.
 _unsure = _Service(mergeable=None, state="unknown")
 _state_unknown = _with_service(
-    _unsure, lambda: _github.mergeability("t", 77, tries=1))
+    _unsure, lambda: _github.mergeability("t", _BOOK, 77, tries=1))
 check("an unsettled pull request is reported as unknown, never as fine",
       _state_unknown == "unknown", _state_unknown)
 check("an unknown state does not offer to publish",
@@ -1078,7 +1147,8 @@ _pub.open_prs.append({"number": 77, "html_url": "u",
                       "created_at": "2026-09-01T00:00:00Z"})
 _refused = None
 try:
-    _with_service(_pub, lambda: _server.r_console_publish(None, {"number": 77}))
+    _with_service(_pub, lambda: _server.r_console_publish(
+        None, dict(_A, number=77)))
 except KeyError as e:
     _refused = str(e.args[0])
 check("publishing without ticking the box is refused",
@@ -1088,7 +1158,7 @@ check("nothing was merged when it was refused", _pub.merged == [], _pub.merged)
 _wrong = None
 try:
     _with_service(_pub, lambda: _server.r_console_publish(
-        None, {"number": 999, "confirm": True}))
+        None, dict(_A, number=999, confirm=True)))
 except KeyError as e:
     _wrong = str(e.args[0])
 check("publishing anything but the request the author was shown is refused",
@@ -1096,7 +1166,7 @@ check("publishing anything but the request the author was shown is refused",
 check("and nothing was merged when it was refused", _pub.merged == [], _pub.merged)
 
 _done = _with_service(_pub, lambda: _server.r_console_publish(
-    None, {"number": 77, "confirm": True}))
+    None, dict(_A, number=77, confirm=True)))
 check("publishing merges the drafts into the live book once confirmed",
       _pub.merged == ["77"], _pub.merged)
 check("the author is told his vault does not know about it yet",
@@ -1114,13 +1184,580 @@ check("the drafts reach the live book as a merge commit, not a squash",
 
 check("nothing waiting to go live means no pull request is opened",
       _with_service(_Service(ahead=0),
-                    lambda: _server._publish_state("t")) == (None, None))
+                    lambda: _server._publish_state("t", _BOOK)) == (None, None))
 
 
 check("the scope asked for excludes the author's private work",
       _github.SCOPE == "public_repo", _github.SCOPE)
 check("all four weekly jobs are known to the console",
       len(_github.WEEKLY_JOBS) == 4, len(_github.WEEKLY_JOBS))
+
+# ---------------------------------------------------------------------------
+# Many books. Every per-book value comes from the registry; the book being
+# worked on is chosen, never assumed; and one book's text can never be written
+# into another book's vault.
+# ---------------------------------------------------------------------------
+
+def _refused(fn, exc=(KeyError, RuntimeError)):
+    """The message a refusal gave, or None if nothing was refused."""
+    try:
+        fn()
+    except exc as e:
+        return str(e.args[0] if e.args else e)
+    return None
+
+
+def _reg_text(**changes):
+    data = json.loads(json.dumps(_REG_DATA))
+    data.update(changes)
+    return json.dumps(data)
+
+
+# --- reading the list ---
+
+check("a well-formed list of books is accepted",
+      len(_registry.parse(_reg_text())["books"]) == 4)
+check("a list naming the same key twice is refused",
+      _refused(lambda: _registry.parse(
+          '{"schema_version": 1, "books": [], "books": []}'),
+          _registry.RegistryError) is not None)
+_dup = json.loads(_reg_text())
+_dup["books"].append(dict(_dup["books"][0], content=dict(
+    _dup["books"][0]["content"], repo="example-org/elsewhere")))
+check("a list naming one book twice is refused",
+      "twice" in (_refused(lambda: _registry.parse(json.dumps(_dup)),
+                           _registry.RegistryError) or ""))
+_dup_repo = json.loads(_reg_text())
+_dup_repo["books"][1]["content"]["repo"] = "Example-Org/BOOK-A"
+check("two books sharing one repository are refused, whatever the case",
+      "share the repository" in (_refused(
+          lambda: _registry.parse(json.dumps(_dup_repo)),
+          _registry.RegistryError) or ""))
+check("a list in a format this app doesn't know is refused",
+      "newer format" in (_refused(lambda: _registry.parse(
+          _reg_text(schema_version=2)), _registry.RegistryError) or ""))
+_same = json.loads(_reg_text())
+_same["books"][0]["content"]["drafts_branch"] = "main"
+check("a book whose drafts and live branches are the same is refused",
+      _refused(lambda: _registry.parse(json.dumps(_same)),
+               _registry.RegistryError) is not None)
+
+check("an unknown book is refused, never swapped for another",
+      "isn't a registered textbook" in (
+          _refused(lambda: _REG.resolve("no-such-book"),
+                   _registry.RegistryError) or ""))
+check("a retired book is refused by name",
+      "any more" in (_refused(lambda: _REG.resolve("old-book"),
+                              _registry.RegistryError) or ""))
+check("a retired book is never offered",
+      [b.slug for b in _REG.active()] == ["book-a", "book-b", "book-c"])
+
+check("every per-book link is worked out from the book's own entry",
+      _BOOK_B.history_url ==
+      "https://github.com/example-org/book-b/commits/published" and
+      _BOOK_B.discussion_url ==
+      "https://hypothes.is/search?q=url:https://book-b.example/*",
+      _BOOK_B.describe())
+check("a book with no site yet has no discussion link rather than a wrong one",
+      _REG.find("book-c").discussion_url is None)
+check("the sign-in identifier comes from the list when none was pasted",
+      _server._client_id() == "Iv1.registry-client", _server._client_id())
+_config.write_state(github_client_id="Iv1.pasted")
+check("an identifier pasted in Settings still takes precedence",
+      _server._client_id() == "Iv1.pasted")
+_config.write_state(github_client_id="")
+
+# Where the list comes from when the network doesn't answer.
+def _offline():
+    raise OSError("no network")
+
+_live = _registry.load(fetch=lambda: _reg_text())
+check("a fresh list is used and saved for later", _live.source == "live" and
+      os.path.exists(_registry.CACHE_FILE))
+_cached = _registry.load(fetch=_offline)
+check("offline, the saved list is used and says it is not fresh",
+      _cached.source == "cached" and _cached.describe()["as_of"] and
+      _cached.find("book-b") is not None, _cached.describe())
+_after_bad = _registry.load(fetch=lambda: _reg_text(schema_version=9))
+check("a broken list is never saved over a good one",
+      _after_bad.source == "cached" and "newer format" in _after_bad.problem,
+      _after_bad.describe())
+os.remove(_registry.CACHE_FILE)
+check("with no list anywhere, nothing is guessed",
+      "no earlier copy" in (_refused(lambda: _registry.load(fetch=_offline),
+                                     _registry.RegistryError) or ""))
+_registry.use(_REG)
+
+# --- which book a vault is ---
+
+check("an SSH alias remote is read as owner/name",
+      _registry.repo_from_url(
+          "git@github-textbook:textbookproject2026-alt/textbook.git")
+      == "textbookproject2026-alt/textbook")
+check("https and ssh:// remotes are read as owner/name",
+      _registry.repo_from_url("https://github.com/o/n.git") == "o/n" and
+      _registry.repo_from_url("ssh://git@github.com/o/n") == "o/n")
+check("a remote that isn't owner/name is not read as one",
+      _registry.repo_from_url("https://example.com/a/b/c") is None)
+
+
+def _make_book_vault(slug=None, remote=None, chapter_text=None, worktree=False):
+    root = tempfile.mkdtemp(prefix="aa-vault-")
+    os.makedirs(os.path.join(root, "chapters"))
+    os.makedirs(os.path.join(root, ".obsidian"))
+    if slug is not None:
+        with open(os.path.join(root, "textbook.config.json"), "w") as fh:
+            json.dump({"slug": slug, "title": "ignored"}, fh)
+    if remote is not None:
+        gitdir = os.path.join(root, ".git")
+        if worktree:
+            main = tempfile.mkdtemp(prefix="aa-main-")
+            common = os.path.join(main, ".git")
+            gitdir = os.path.join(common, "worktrees", "wt")
+            os.makedirs(gitdir)
+            with open(os.path.join(gitdir, "commondir"), "w") as fh:
+                fh.write("../..\n")
+            with open(os.path.join(root, ".git"), "w") as fh:
+                fh.write(f"gitdir: {gitdir}\n")
+            gitdir = common
+        os.makedirs(gitdir, exist_ok=True)
+        with open(os.path.join(gitdir, "config"), "w") as fh:
+            fh.write('[core]\n\tbare = false\n[remote "upstream"]\n'
+                     '\turl = git@github.com:example-org/book-b.git\n'
+                     f'[remote "origin"]\n\turl = {remote}\n'
+                     '\tfetch = +refs/heads/*:refs/remotes/origin/*\n')
+    with open(os.path.join(root, "chapters", "chapter-01.md"), "w") as fh:
+        fh.write(chapter_text or "# One\n\nThe the words are here.\nLeave me.\n")
+    return root
+
+
+_va = _make_book_vault("book-a", "git@github-textbook:Example-Org/Book-A.git")
+_vb = _make_book_vault("book-b", "https://github.com/example-org/book-b.git")
+_idA = _registry.identify(_va)
+check("a vault whose name and remote agree with the list is that book",
+      _idA["state"] == "ok" and _idA["book"].slug == "book-a", _idA)
+check("only origin is compared, not another remote",
+      _registry.origin_repo(_va) == "Example-Org/Book-A")
+check("a vault found from its chapters folder is the whole vault",
+      _registry.vault_root(os.path.join(_va, "chapters")) == _va)
+check("a worktree's remote is read from the main checkout",
+      _registry.identify(_make_book_vault(
+          "book-b", "git@github.com:example-org/book-b.git",
+          worktree=True))["state"] == "ok")
+
+_vmis = _make_book_vault("book-a", "git@github.com:example-org/book-b.git")
+_idmis = _registry.identify(_vmis)
+check("a vault that names one book but is a copy of another is refused",
+      _idmis["state"] == "remote_mismatch" and _idmis["book"] is None and
+      "example-org/book-b" in _idmis["message"] and
+      "example-org/book-a" in _idmis["message"], _idmis["message"])
+check("a vault naming a book that isn't registered is refused",
+      _registry.identify(_make_book_vault("no-such", "git@x:o/n.git"))["state"]
+      == "unknown_slug")
+check("a vault naming a retired book is refused",
+      _registry.identify(_make_book_vault("old-book",
+                                          "git@x:example-org/old-book.git"))
+      ["state"] == "unknown_slug")
+check("a vault naming a book but with no remote can't be confirmed",
+      _registry.identify(_make_book_vault("book-a"))["state"] == "no_remote")
+_vplain = _make_book_vault()
+check("a vault that names no book is just unlinked",
+      _registry.identify(_vplain)["state"] == "unlinked")
+
+# --- the books offered are the books the author can act on ---
+
+class _Books(_Service):
+    """The service, answering which repositories the author can write to."""
+
+    def __init__(self, perms, offline=False, **kw):
+        super().__init__(**kw)
+        self.perms = perms
+        self.offline = offline
+        self.issues = {}
+
+    def request(self, method, url, token=None, payload=None, accept=None):
+        if url == f"{_github.API}/user":
+            if self.offline:
+                return _github.Problem("offline", offline=True)
+            return {"login": "author", "name": "The Author"}
+        for repo, perm in self.perms.items():
+            if url == f"{_github.API}/repos/{repo}":
+                self.calls.append((method, url, payload))
+                if self.offline:
+                    return _github.Problem("offline", offline=True)
+                if perm == 404:
+                    return _github.Problem("gone", code=404)
+                if perm == 500:
+                    return _github.Problem("trouble", code=500)
+                return {"full_name": repo, "private": perm == "private",
+                        "permissions": {"push": perm == "write",
+                                        "pull": True}}
+        if "/issues?" in url:
+            self.calls.append((method, url, payload))
+            return list(self.issues.get(url.split("/repos/")[1].split("/issues")[0], []))
+        if "/actions/workflows/" in url:
+            return {"workflow_runs": []}
+        return super().request(method, url, token, payload, accept)
+
+
+_PERMS = {"example-org/book-a": "write", "example-org/book-b": "read",
+          "other-org/book-c": 404}
+_on_book(None)
+_config.write_state(book_access=None, last_book=None)
+_bk = _with_service(_Books(_PERMS), lambda: _server.r_books(None, {}))
+check("only books the author can change are offered",
+      [b["slug"] for b in _bk["books"]] == ["book-a"], _bk["books"])
+check("the author is told how many other books were left out",
+      _bk["hidden"] == 2, _bk["hidden"])
+check("a retired book is not even checked",
+      _server.CONSOLE["access"].get("old-book") is None)
+check("offering a book shows where it lives",
+      _bk["books"][0]["repo"] == "example-org/book-a")
+check("a book the author can only read can't be chosen",
+      "can't make changes" in (_refused(lambda: _server.r_books_choose(
+          None, {"slug": "book-b"})) or ""))
+check("a book not in the list can't be chosen",
+      "isn't a registered textbook" in (_refused(lambda: _server.r_books_choose(
+          None, {"slug": "made-up"})) or ""))
+_ws = _server.r_books_choose(None, {"slug": "book-a"})
+check("choosing a book makes it the one on screen",
+      _ws["book"]["slug"] == "book-a" and _ws["book"]["access"] == "write", _ws)
+check("the choice is remembered for next time",
+      _config.read_state().get("last_book") == "book-a")
+
+_access_err = _with_service(
+    _Books({"example-org/book-a": 500}),
+    lambda: _github.repo_access("t", _BOOK))
+check("a service fault is not mistaken for having no access",
+      isinstance(_access_err, _github.Problem), _access_err)
+check("a private repository is never offered, since sign-in can't reach it",
+      _with_service(_Books({"example-org/book-a": "private"}),
+                    lambda: _github.repo_access("t", _BOOK)) == "none")
+
+# Offline, the last answer is shown for what it is.
+_server.CONSOLE.update(access={}, login=None)
+_off = _with_service(_Books(_PERMS, offline=True),
+                     lambda: _server.r_books(None, {}))
+check("offline, the books last known to be yours are still offered",
+      [b["slug"] for b in _off["books"]] == ["book-a"] and _off["offline"],
+      _off)
+check("offline, the list says when access was last checked",
+      "as of" in _off["note"], _off["note"])
+
+# Next run: the remembered book comes back by itself, unless it is no longer
+# the author's to change.
+_server.WORKSPACE.update(vault=None, book=None, restored=False)
+_server.CONSOLE.update(access={})
+check("the last book chosen is brought back on the next run",
+      _server.r_workspace(None, {})["book"]["slug"] == "book-a")
+_config.write_state(last_book="book-b")
+_server.WORKSPACE.update(vault=None, book=None, restored=False)
+check("a remembered book the author can no longer change is not brought back",
+      _server.r_workspace(None, {})["book"] is None)
+_config.write_state(last_book="old-book")
+_server.WORKSPACE.update(vault=None, book=None, restored=False)
+check("a remembered book that has been retired is not brought back",
+      _server.r_workspace(None, {})["book"] is None)
+
+_so = _with_service(_Books(_PERMS), lambda: _server.r_console_signout(None, {}))
+check("signing out forgets which books the last account could change",
+      _config.read_state().get("book_access") is None and
+      _server.CONSOLE["access"] == {})
+
+# --- the vault decides the book ---
+
+_on_book(_BOOK_B, access=None)
+_server.CONSOLE["access"].update({"book-a": "write", "book-b": "write"})
+_server._open_vault(_va)
+_ws = _server._workspace_info()
+check("opening a vault switches the app to that vault's book",
+      _ws["book"]["slug"] == "book-a" and _ws["locked"] and
+      _ws["can_write_vault"], _ws)
+check("with a vault open, another book can't be chosen",
+      "Close the vault first" in (_refused(lambda: _server.r_books_choose(
+          None, {"slug": "book-b"})) or ""))
+check("with a vault open, choosing its own book is fine",
+      _server.r_books_choose(None, {"slug": "book-a"})["book"]["slug"] == "book-a")
+
+_before_ws = dict(_server.WORKSPACE)
+_mis_msg = _refused(lambda: _server._open_vault(_vmis))
+check("a vault that is a copy of another book's repository is refused on opening",
+      _mis_msg is not None and "is a copy of example-org/book-b" in _mis_msg,
+      _mis_msg)
+check("and the app stays on the vault and book it had",
+      _server.WORKSPACE["vault"]["root"] == _va and
+      _server.WORKSPACE["book"] == "book-a")
+_server.picker.choose_folder = lambda *a: (_vmis, None)
+_pv = _server.r_console_pick_vault(None, {})
+_server.picker.choose_folder = _no_chooser
+check("choosing that vault from the console says why it was refused",
+      "is a copy of" in (_pv.get("error") or ""), _pv)
+
+_server.r_vault_close(None, {})
+_ws = _server._workspace_info()
+check("closing the vault keeps the book but stops chapter changes",
+      _ws["book"]["slug"] == "book-a" and not _ws["locked"] and
+      not _ws["can_write_vault"], _ws)
+check("with the vault closed, another book can be chosen",
+      _server.r_books_choose(None, {"slug": "book-b"})["book"]["slug"] == "book-b")
+
+_server._open_vault(_vplain)
+check("opening a vault that names no book leaves no book chosen",
+      _server._workspace_info()["book"] is None and
+      _server._workspace_info()["vault"]["state"] == "unlinked")
+check("so the console can't show one book beside another book's vault",
+      "No book is chosen" in (_refused(lambda: _server._book_for(_A)) or ""))
+
+# --- the dangerous case: a suggestion for one book, a vault of another -------
+
+_ISSUE_A = dict(_ISSUE, number=41, title="Suggested edit: chapters/chapter-01.md",
+                repository_url=f"{_github.API}/repos/example-org/book-a",
+                body=_ISSUE["body"].replace(
+                    '"the the domains" should be "the three domains"',
+                    '"The the words" should be "The words"'))
+_ISSUE_B = dict(_ISSUE_A, number=42,
+                repository_url=f"{_github.API}/repos/example-org/book-b")
+
+
+def _chapter(root):
+    with open(os.path.join(root, "chapters", "chapter-01.md")) as fh:
+        return fh.read()
+
+
+_A_TEXT, _B_TEXT = _chapter(_va), _chapter(_vb)
+
+
+def _service_with_issues():
+    svc = _Books({"example-org/book-a": "write", "example-org/book-b": "write"})
+    svc.issues = {"example-org/book-a": [_ISSUE_A],
+                  "example-org/book-b": [_ISSUE_B]}
+    return svc
+
+
+def _writes(svc):
+    return [c for c in svc.calls if c[0] in ("POST", "PATCH", "PUT", "DELETE")]
+
+
+# The screen was drawn for book B with book B's vault open. The author then
+# opens book A's vault, and an old page asks to apply B's suggestion.
+_svc = _service_with_issues()
+_on_book(_BOOK_B)
+_server._open_vault(_vb)
+_B = {"book": "book-b"}
+_loaded = _with_service(_svc, lambda: _server.r_console_load(None, dict(_B)))
+check("the list is fetched from the chosen book's repository only",
+      all("/repos/example-org/book-b/" in c[1] for c in _svc.calls
+          if "/issues?" in c[1] or "/pulls" in c[1] or "/compare/" in c[1]),
+      [c[1] for c in _svc.calls])
+check("drafts are looked for on the book's own drafts branch",
+      any("base=staging" in c[1] for c in _svc.calls),
+      [c[1] for c in _svc.calls])
+check("the list says which book it belongs to",
+      _loaded["book"]["slug"] == "book-b" and
+      _loaded["book"]["history_url"].endswith("/book-b/commits/published"))
+_planB = _server.r_console_plan(None, dict(_B, number=42))
+check("B's suggestion can be applied to B's own vault", _planB["can_apply"],
+      _planB)
+
+_server._open_vault(_va)          # the author opens book A's vault
+_svc.calls.clear()
+_msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
+    None, dict(_B, number=42, apply=True))))
+check("an old screen for book B can't act once book A's vault is open",
+      _msg is not None and "different book" in _msg, _msg)
+check("…and neither chapter was touched",
+      _chapter(_va) == _A_TEXT and _chapter(_vb) == _B_TEXT)
+check("…and no reply was sent or suggestion closed", _writes(_svc) == [],
+      _writes(_svc))
+check("a plan made for book B is dropped when the vault changes book",
+      _server.CONSOLE["plans"] == {})
+
+# Even if every check in front of it failed, the write itself refuses: the
+# app believes it is on book B, with a plan for book B, but the vault on disk
+# is book A.
+_server.WORKSPACE["book"] = "book-b"
+_forged = {"can_apply": True, "book": "book-b", "vault": _va,
+           "file_path": os.path.join(_va, "chapters", "chapter-01.md"),
+           "old": "The the words", "new": "The words", "line_no": 3,
+           "before": "The the words are here."}
+_server.CONSOLE["plans"][("book-b", "42")] = _forged
+_svc.calls.clear()
+_msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
+    None, dict(_B, number=42, apply=True))))
+check("the write is refused when the vault on disk is another book",
+      _msg is not None and "Nothing was written" in _msg and
+      "Book B" in _msg and "Book A" in _msg, _msg)
+check("…and book A's chapter is byte for byte as it was",
+      _chapter(_va) == _A_TEXT)
+check("…and nothing was sent to either book", _writes(_svc) == [])
+_server.CONSOLE["plans"].clear()
+
+# Back on book A, properly. Its vault's settings are changed on disk after it
+# was opened, so the vault is no longer what the header says.
+_on_book(_BOOK)
+_server._open_vault(_va)
+_A = {"book": "book-a"}
+_svc = _service_with_issues()
+_with_service(_svc, lambda: _server.r_console_load(None, dict(_A)))
+check("a suggestion filed on another book's repository is never listed",
+      list(_server.CONSOLE["loaded"]["suggestions"]) == ["41"])
+_planA = _server.r_console_plan(None, dict(_A, number=41))
+check("A's suggestion is planned against A's vault",
+      _planA["can_apply"] and _planA["line_no"] == 3, _planA)
+check("a suggestion from another book can't even be looked at here",
+      "isn't in the list" in (_refused(lambda: _server.r_console_plan(
+          None, dict(_A, number=42))) or ""))
+
+_cfg = os.path.join(_va, "textbook.config.json")
+with open(_cfg, "w") as fh:
+    json.dump({"slug": "book-b"}, fh)
+_svc.calls.clear()
+_msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
+    None, dict(_A, number=41, apply=True))))
+check("a vault whose settings changed after opening is refused",
+      _msg is not None and "changed after it was opened" in _msg, _msg)
+check("…and nothing was written or sent",
+      _chapter(_va) == _A_TEXT and _writes(_svc) == [])
+with open(_cfg, "w") as fh:
+    json.dump({"slug": "book-a"}, fh)
+
+_gitcfg = os.path.join(_va, ".git", "config")
+with open(_gitcfg) as fh:
+    _good_git = fh.read()
+with open(_gitcfg, "w") as fh:
+    fh.write(_good_git.replace("Example-Org/Book-A", "example-org/book-b"))
+_msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
+    None, dict(_A, number=41, apply=True))))
+check("a vault whose remote changed after opening is refused",
+      _msg is not None and _chapter(_va) == _A_TEXT and _writes(_svc) == [],
+      _msg)
+with open(_gitcfg, "w") as fh:
+    fh.write(_good_git)
+
+# A plan worked out for another vault of the same book is not carried over.
+_va2 = _make_book_vault("book-a", "git@github.com:example-org/book-a.git")
+_server._open_vault(_va2)
+_server.CONSOLE["plans"][("book-a", "41")] = dict(_forged, book="book-a")
+_msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
+    None, dict(_A, number=41, apply=True))))
+check("a plan made for a different vault of the same book is refused",
+      _msg is not None and "different book or vault" in _msg and
+      _chapter(_va) == _A_TEXT, _msg)
+
+# The ordinary case still works, and keeps its guarantees.
+_server._open_vault(_va)
+_server.r_console_plan(None, dict(_A, number=41))
+_svc.calls.clear()
+_ok = _with_service(_svc, lambda: _server.r_console_accept(
+    None, dict(_A, number=41, apply=True)))
+_after = _chapter(_va).split("\n")
+check("accepting into the matching vault changes exactly the one line",
+      _ok["done"] and _after[2] == "The words are here." and
+      [l for i, l in enumerate(_after) if i != 2] ==
+      [l for i, l in enumerate(_A_TEXT.split("\n")) if i != 2], _after)
+check("the reply and closing go to that book's repository and no other",
+      _writes(_svc) and all("/repos/example-org/book-a/issues/41" in c[1]
+                            for c in _writes(_svc)), _writes(_svc))
+check("book B's vault was never touched", _chapter(_vb) == _B_TEXT)
+
+# A suggestion naming a page outside the vault is never followed.
+_escape = _console.plan_change(
+    os.path.join(_va, "chapters"),
+    "../../" + os.path.basename(_vb) + "/chapters/chapter-01.md",
+    '"The the words" should be "Changed"')
+check("a suggestion whose page leads out of the vault is refused",
+      _escape["can_apply"] is False and "outside" in _escape["reason"],
+      _escape["reason"])
+os.symlink(os.path.join(_vb, "chapters", "chapter-01.md"),
+           os.path.join(_va, "chapters", "linked.md"))
+_link = _console.plan_change(_va, "chapters/linked.md",
+                             '"The the words" should be "Changed"')
+check("a page that is a link into another vault is refused",
+      _link["can_apply"] is False and _chapter(_vb) == _B_TEXT, _link["reason"])
+
+# Reading only: a book the author can merely read can't be acted on.
+_on_book(_BOOK_B, access="read")
+_svc = _service_with_issues()
+check("a book the author can only read refuses to act",
+      "can't make changes" in (_with_service(_svc, lambda: _refused(
+          lambda: _server.r_console_decline(
+              None, {"book": "book-b", "number": 1}))) or "") and
+      _writes(_svc) == [])
+_on_book(_BOOK)
+
+# --- the Chapters tools can't save into a vault the app has moved away from ---
+
+_sess_root = _make_book_vault("book-a", "git@github.com:example-org/book-a.git")
+_server.SESSIONS.clear()
+
+
+class _Handler:
+    _session = _server.Handler._session
+
+
+_H = _Handler()
+_opened = _server.r_open(None, {"path": _sess_root})
+check("opening a vault for the Chapters tools sets the book too",
+      _opened["workspace"]["book"]["slug"] == "book-a", _opened["workspace"])
+_sid = _opened["session_id"]
+_ch = os.path.join(_sess_root, "chapters", "chapter-01.md")
+_server.r_prepare(_H, {"session_id": _sid, "chapter": _ch})
+_server.r_analyse(_H, {"session_id": _sid})
+_server._open_vault(_vb)          # the console moves to book B's vault
+_ch_before = _chapter(_sess_root)
+_msg = _refused(lambda: _server.r_commit(
+    _H, {"session_id": _sid, "accepted": [], "expand_groups": []}))
+check("a chapter opened in one vault can't be saved after the app moves on",
+      _msg is not None and "different vault" in _msg and
+      _chapter(_sess_root) == _ch_before, _msg)
+
+_server._open_vault(_sess_root)
+with open(os.path.join(_sess_root, "textbook.config.json"), "w") as fh:
+    json.dump({"slug": "no-such"}, fh)
+_msg = _refused(lambda: _server.r_commit(
+    _H, {"session_id": _sid, "accepted": [], "expand_groups": []}))
+check("a vault whose book claim changed on disk is not saved into",
+      _msg is not None and "changed after it was opened" in _msg, _msg)
+check("opening a vault whose claim fails is refused for the Chapters tools too",
+      "isn't a registered textbook" in (_refused(lambda: _server.r_open(
+          None, {"path": _sess_root})) or ""))
+
+_plain_sess = _server.r_open(None, {"path": _vplain})
+_server.r_prepare(_H, {"session_id": _plain_sess["session_id"],
+                         "chapter": os.path.join(_vplain, "chapters",
+                                                 "chapter-01.md")})
+_server.r_analyse(_H, {"session_id": _plain_sess["session_id"]})
+_saved = _server.r_commit(_H, {"session_id": _plain_sess["session_id"],
+                                 "accepted": [], "expand_groups": []})
+check("a vault that names no book still works with the Chapters tools",
+      "written" in _saved, _saved)
+_server.r_vault_close(None, {})
+check("a chapter can't be saved once its vault is closed",
+      "vault was closed" in (_refused(lambda: _server.r_commit(
+          _H, {"session_id": _plain_sess["session_id"], "accepted": [],
+                 "expand_groups": []})) or ""))
+
+# --- nothing per-book is written into the app ---
+
+_constants = []
+for _rel in ("app/github.py", "app/server.py", "app/console.py",
+             "app/web/app.js", "app/web/index.html"):
+    with open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), *_rel.split("/")),
+            encoding="utf-8") as fh:
+        _src = fh.read()
+    for _needle in ("textbookproject2026-alt/textbook", "confused4now",
+                    "social-research-methods", 'OWNER = "', 'REPO = "',
+                    "DRAFTS_BRANCH", "LIVE_BRANCH", "base=drafts"):
+        if _needle in _src:
+            _constants.append(f"{_rel}: {_needle}")
+check("no book's repository, branch or site is written into the app",
+      not _constants, _constants)
+
+_on_book(_BOOK)
+for _d in (_va, _vb, _vmis, _vplain, _va2, _sess_root):
+    shutil.rmtree(_d, ignore_errors=True)
+
 
 # --- secrets ---
 
@@ -1229,6 +1866,7 @@ check("every word the troubleshooting guide quotes is still in the app",
 shutil.rmtree(_vault, ignore_errors=True)
 
 shutil.rmtree(root, ignore_errors=True)
+shutil.rmtree(_support, ignore_errors=True)
 
 print()
 print(f"  {len(PASS)} passed, {len(FAIL)} failed")

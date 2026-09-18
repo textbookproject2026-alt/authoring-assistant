@@ -9,7 +9,7 @@ const ids = [...html.matchAll(/id="([^"]+)"/g)].map(m => m[1]);
 
 function mkEl(id) {
   const e = {
-    id, textContent: '', innerHTML: '', value: '', checked: false, disabled: false,
+    id, textContent: '', _html: '', value: '', checked: false, disabled: false,
     style: {}, dataset: {}, children: [], parentElement: null,
     classList: {
       _s: new Set(),
@@ -19,6 +19,9 @@ function mkEl(id) {
       toggle(c, on) { on === undefined ? (this._s.has(c) ? this._s.delete(c) : this._s.add(c)) : (on ? this._s.add(c) : this._s.delete(c)); },
     },
     appendChild(c) { this.children.push(c); return c; },
+    // As in a browser, emptying the markup empties the children too.
+    get innerHTML() { return this._html; },
+    set innerHTML(v) { this._html = v; if (v === '') this.children = []; },
     querySelectorAll() { return []; },
   };
   e.parentElement = { style: {} };
@@ -33,7 +36,8 @@ const steps = ['step-choose','step-chapter','step-options','step-working','step-
                'step-import','step-import-setup','step-import-preview',
                'step-import-done',
                'step-console','step-suggestion','step-draft','step-publish',
-               'step-console-done'];
+               'step-console-done','step-books','step-console-setup',
+               'step-console-signin'];
 steps.forEach(s => els[s].classList.add('step'));
 
 const groupSpans = [mkEl('grp1'), mkEl('grp2')];
@@ -82,6 +86,28 @@ const FINDINGS = [
     detail: 'Structural elaboration.', detail_label: 'Suggested wording' },
 ];
 
+// Which book the fake server is on. The page must follow it, never assume one.
+const BOOK_A = {
+  slug: 'book-a', title: 'Book A', repo: 'example-org/book-a', access: 'write',
+  status: 'live', site: null, discussion_url: null,
+  history_url: 'https://github.com/example-org/book-a/commits/main',
+};
+const BOOK_B = Object.assign({}, BOOK_A, {
+  slug: 'book-b', title: 'Book B', repo: 'example-org/book-b',
+  discussion_url: 'https://hypothes.is/search?q=url:https://b.example/*',
+  history_url: 'https://github.com/example-org/book-b/commits/published',
+});
+const WS_NONE = { book: null, vault: null, locked: false, can_write_vault: false,
+                  registry: { source: 'live', fresh: true, as_of: '17 September 2026' } };
+const WS_A = { book: BOOK_A, vault: null, locked: false, can_write_vault: false,
+               registry: { source: 'cached', fresh: false, as_of: '16 September 2026' } };
+const WS_A_VAULT = { book: BOOK_A, locked: true, can_write_vault: true,
+                     vault: { name: 'Vault A', root: '/va', state: 'ok', message: '' },
+                     registry: { source: 'live', fresh: true } };
+const WS_B = Object.assign({}, WS_A, { book: BOOK_B });
+let CURRENT_WS = WS_NONE;
+const bodies = {};
+
 let lastPreviewBody = null;
 let lastConvertBody = null;
 // Flipped part-way through the run, to check the screen shown when the
@@ -91,6 +117,9 @@ const calls = [];
 const fetch = async (route, opts) => {
   calls.push(route);
   const body = JSON.parse(opts.body || '{}');
+  bodies[route] = body;
+  if (route === '/api/books/choose') CURRENT_WS = body.slug === 'book-b' ? WS_B : WS_A;
+  if (route === '/api/vault/close') CURRENT_WS = WS_A;
   const reply = {
     '/api/env': {
       pandoc: true, deepseek: false, deepseek_hint: null, obsidian_running: false,
@@ -135,9 +164,15 @@ const fetch = async (route, opts) => {
     },
     '/api/import/cancel': { ok: true },
 
+    '/api/workspace': CURRENT_WS,
+    '/api/books': { books: [BOOK_A], hidden: 2, offline: false, note: '',
+                    workspace: CURRENT_WS },
+    '/api/books/choose': CURRENT_WS,
+    '/api/vault/close': CURRENT_WS,
     '/api/console/status': { configured: true, signed_in: true, who: 'The Author',
-                             keychain: true, root: null, root_name: null },
+                             keychain: true, workspace: CURRENT_WS },
     '/api/console/load': {
+      book: CURRENT_WS.book, workspace: CURRENT_WS,
       who: 'The Author', suggestions: [], drafts: [], weekly: [],
       problems: [], offline: false,
       publish: {
@@ -368,8 +403,47 @@ function check(name, cond, got) {
 
   // --- the console: accepting is not publishing ------------------------------
 
+  const text = n => [n.textContent, ...n.children.map(text)].join(' ');
+
+  check('with no book chosen, the bar says so rather than naming one',
+        els['bookbar-book'].textContent === 'No book chosen', els['bookbar-book'].textContent);
+
   await ctx.document.getElementById('go-console').onclick();
   await new Promise(r => setTimeout(r, 30));
+  check('with no book chosen, the console asks which book first',
+        !els['step-books'].classList.contains('hidden') &&
+        !calls.includes('/api/console/load'), calls);
+  check('it offers the books the server says the author can change',
+        els['books-list'].children.length === 1 &&
+        text(els['books-list']).includes('example-org/book-a'),
+        text(els['books-list']));
+  check('it says how many other books were left out, and why',
+        els['books-hidden'].textContent.includes('2 other books') &&
+        els['books-hidden'].textContent.includes('can’t make changes'),
+        els['books-hidden'].textContent);
+
+  await els['books-list'].children[0].children[0].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('choosing a book sends its name, and nothing else decides it',
+        bodies['/api/books/choose'] && bodies['/api/books/choose'].slug === 'book-a',
+        bodies['/api/books/choose']);
+  check('the bar then names the book and where it lives',
+        text(els['bookbar-book']).includes('Book A') &&
+        text(els['bookbar-book']).includes('example-org/book-a'),
+        text(els['bookbar-book']));
+  check('the bar says when the list of books is not fresh',
+        els['bookbar-registry'].textContent.includes('as of 16 September 2026') &&
+        !els['bookbar-registry'].classList.contains('hidden'),
+        els['bookbar-registry'].textContent);
+  check('the console says whose list it is',
+        els['console-book'].textContent === 'For Book A', els['console-book'].textContent);
+  check('the list is asked for by book',
+        bodies['/api/console/load'] && bodies['/api/console/load'].book === 'book-a',
+        bodies['/api/console/load']);
+  check('the history link is the book’s own',
+        els['link-history'].href === BOOK_A.history_url, els['link-history'].href);
+  check('a book with no site shows no discussion link rather than a wrong one',
+        els['discussion-item'].classList.contains('hidden'), 'shown');
   check('the console shows what is waiting',
         !els['step-console'].classList.contains('hidden'), 'wrong screen');
   check('what has been accepted but not sent is shown under "Going live"',
@@ -404,11 +478,72 @@ function check(name, cond, got) {
   els['publish-confirm'].checked = true;
   await els['publish-go'].onclick();
   await new Promise(r => setTimeout(r, 20));
+  check('the box names the book whose readers would get it',
+        text(els['publish-body']).includes('readers of Book A'), text(els['publish-body']));
   check('ticking the box sends the drafts to the live book',
         calls.includes('/api/console/publish'), calls);
+  check('and it says which book it is publishing',
+        bodies['/api/console/publish'].book === 'book-a' &&
+        bodies['/api/console/publish'].number === 77,
+        bodies['/api/console/publish']);
   check('afterwards the author is told his vault is now behind',
         els['cdone-steps'].children.some(c => c.textContent.includes('vault does not know')),
         els['cdone-steps'].children.map(c => c.textContent));
+
+  // --- a vault decides the book ---------------------------------------------
+
+  CURRENT_WS = WS_A_VAULT;
+  await els['console-refresh'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('with a vault open, the book can’t be changed from the bar',
+        els['bookbar-change'].classList.contains('hidden') &&
+        !els['bookbar-close'].classList.contains('hidden'), 'change still offered');
+  check('the bar says the vault is what decides',
+        els['bookbar-vault'].textContent.includes('Vault A') &&
+        els['bookbar-vault'].textContent.includes('decides the book'),
+        els['bookbar-vault'].textContent);
+  check('the suggestion screen offers to change the chapter in that vault by name',
+        js.includes("'Make this change to my chapter in “' + (WS.vault ? WS.vault.name : '')"),
+        'label missing');
+
+  await els['bookbar-change'].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('asking to change book with a vault open explains the vault decides',
+        !els['books-locked'].classList.contains('hidden') &&
+        els['books-locked-text'].textContent.includes('close the vault first'),
+        els['books-locked-text'].textContent);
+
+  await els['books-close-vault'].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('closing the vault from there frees the choice',
+        calls.includes('/api/vault/close') &&
+        els['books-locked'].classList.contains('hidden'), calls);
+
+  // Another book: whatever was counted for the last one goes.
+  await els['books-list'].children[els['books-list'].children.length - 1]
+    .children[0].onclick();
+  check('the list only offers the books the author can change, even unlocked',
+        bodies['/api/books/choose'].slug === 'book-a', bodies['/api/books/choose']);
+  CURRENT_WS = WS_B;
+  els['waiting-count'].textContent = '1';
+  els['waiting-count'].classList.remove('hidden');
+  await ctx.refreshWorkspace();
+  check('when the book changes, the old book’s count is cleared at once',
+        els['waiting-count'].textContent === '' &&
+        els['waiting-count'].classList.contains('hidden'),
+        els['waiting-count'].textContent);
+  await ctx.document.getElementById('go-console').onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('switching to another book shows that book, not the last one',
+        els['console-book'].textContent === 'For Book B' &&
+        bodies['/api/console/load'].book === 'book-b',
+        [els['console-book'].textContent, bodies['/api/console/load']]);
+  check('and its own discussion link',
+        els['link-discussion'].href === BOOK_B.discussion_url &&
+        !els['discussion-item'].classList.contains('hidden'),
+        els['link-discussion'].href);
+  check('nothing in the page names a book of its own',
+        !/confused4now|textbookproject2026-alt\/textbook\b/.test(js), 'constant found');
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

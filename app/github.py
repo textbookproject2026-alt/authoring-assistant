@@ -21,22 +21,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-OWNER = "textbookproject2026-alt"
-REPO = "textbook"
-
-# The two branches the console cares about. Everything proposed — a
+# Which repository, and which branches, belong to the book being worked on is
+# never written here. Every call that touches a book takes the `Book` the
+# registry resolved (registry.py) and uses only its values.
+#
+# Each book has two branches the console cares about. Everything proposed — a
 # contributor's change accepted here, or a draft written in the browser CMS —
-# lands on `drafts`. `main` is what readers see. Nothing reaches `main` except
-# through a pull request from `drafts`, which is the only door and is the door
-# the console now opens.
-DRAFTS_BRANCH = "drafts"
-LIVE_BRANCH = "main"
+# lands on the drafts branch. The live branch is what readers see. Nothing
+# reaches the live branch except through a pull request from the drafts branch,
+# which is the only door and is the door the console opens.
 
 API = "https://api.github.com"
 DEVICE_CODE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 
-# The repository is public, so this is the narrowest scope that still allows
+# Every registered repository is public, so this is the narrowest scope that still allows
 # closing a suggestion, leaving a reply, and accepting a draft change. It
 # deliberately gives no access to any private work the author may have.
 SCOPE = "public_repo"
@@ -56,10 +55,11 @@ WEEKLY_JOBS = [
 class Problem:
     """Something did not work, described the way the author should hear it."""
 
-    def __init__(self, message, needs_signin=False, offline=False):
+    def __init__(self, message, needs_signin=False, offline=False, code=None):
         self.message = message
         self.needs_signin = needs_signin
         self.offline = offline
+        self.code = code
 
     def __repr__(self):
         return f"Problem({self.message!r})"
@@ -98,6 +98,12 @@ def _request(method, url, token=None, payload=None, accept="application/vnd.gith
 
 
 def _http_problem(e):
+    problem = _describe_http(e)
+    problem.code = e.code
+    return problem
+
+
+def _describe_http(e):
     code = e.code
     try:
         detail = json.loads(e.read().decode("utf-8", "replace"))
@@ -234,11 +240,33 @@ def whoami(token):
     }
 
 
+def repo_access(token, book):
+    """Whether the signed-in author can act on this book.
+
+    Returns "write", "read" or "none", or a Problem. Acting — closing a
+    suggestion, accepting a change, publishing — needs write access, so only
+    books answering "write" are offered.
+    """
+    result = _request("GET", f"{API}/repos/{book.repo}", token=token)
+    if isinstance(result, Problem):
+        if result.code == 404 or (result.code == 403
+                                  and "slow down" not in result.message):
+            return "none"   # a missing or hidden repository is not ours to use
+        return result
+    perms = result.get("permissions") or {}
+    if not book.same_repo(result.get("full_name")) or result.get("private"):
+        # Moved, or private (which the narrow sign-in scope cannot reach).
+        return "none"
+    if perms.get("admin") or perms.get("maintain") or perms.get("push"):
+        return "write"
+    return "read" if perms.get("pull") else "none"
+
+
 # --- reading -----------------------------------------------------------------
 
-def suggested_edits(token):
+def suggested_edits(token, book):
     """Open reader suggestions, newest first."""
-    url = (f"{API}/repos/{OWNER}/{REPO}/issues"
+    url = (f"{API}/repos/{book.repo}/issues"
            f"?labels=suggested-edit&state=open&sort=created&direction=desc&per_page=50")
     result = _request("GET", url, token=token)
     if isinstance(result, Problem):
@@ -248,36 +276,50 @@ def suggested_edits(token):
     return [i for i in result if isinstance(i, dict) and "pull_request" not in i]
 
 
-def draft_changes(token):
+def from_book(item, book):
+    """True if an issue or pull request really came from this book's repository.
+
+    Checked on every item before it is shown, because a suggestion is only ever
+    applied to the vault of the book it was filed against.
+    """
+    url = (item.get("repository_url") or "").rstrip("/")
+    if url:
+        return url.casefold() == f"{API}/repos/{book.repo}".casefold()
+    base = ((item.get("base") or {}).get("repo") or {}).get("full_name")
+    return book.same_repo(base)
+
+
+def draft_changes(token, book):
     """Proposed changes waiting to go into the drafts area."""
-    url = (f"{API}/repos/{OWNER}/{REPO}/pulls"
-           f"?base=drafts&state=open&sort=created&direction=desc&per_page=50")
+    url = (f"{API}/repos/{book.repo}/pulls"
+           f"?state=open&sort=created&direction=desc&per_page=50"
+           f"&base={urllib.parse.quote(book.drafts_branch)}")
     result = _request("GET", url, token=token)
     if isinstance(result, Problem):
         return result
     return [p for p in result if isinstance(p, dict)]
 
 
-def change_files(token, number):
+def change_files(token, book, number):
     """Which files a proposed change touches, and how."""
-    url = f"{API}/repos/{OWNER}/{REPO}/pulls/{number}/files?per_page=100"
+    url = f"{API}/repos/{book.repo}/pulls/{number}/files?per_page=100"
     return _request("GET", url, token=token)
 
 
-def file_at_ref(token, path, ref):
+def file_at_ref(token, book, path, ref):
     """The text of one file as it stands on a given version."""
-    url = (f"{API}/repos/{OWNER}/{REPO}/contents/"
+    url = (f"{API}/repos/{book.repo}/contents/"
            f"{urllib.parse.quote(path)}?ref={urllib.parse.quote(ref)}")
     result = _request("GET", url, token=token,
                       accept="application/vnd.github.raw")
     return result
 
 
-def weekly_status(token):
+def weekly_status(token, book):
     """Whether each of the four weekly jobs last finished successfully."""
     out = []
     for filename, friendly in WEEKLY_JOBS:
-        url = (f"{API}/repos/{OWNER}/{REPO}/actions/workflows/"
+        url = (f"{API}/repos/{book.repo}/actions/workflows/"
                f"{filename}/runs?per_page=1&status=completed")
         result = _request("GET", url, token=token)
         if isinstance(result, Problem):
@@ -298,27 +340,27 @@ def weekly_status(token):
 
 # --- writing -----------------------------------------------------------------
 
-def comment(token, number, text):
+def comment(token, book, number, text):
     return _request(
         "POST",
-        f"{API}/repos/{OWNER}/{REPO}/issues/{number}/comments",
+        f"{API}/repos/{book.repo}/issues/{number}/comments",
         token=token,
         payload={"body": text},
     )
 
 
-def close_issue(token, number):
+def close_issue(token, book, number):
     return _request(
         "PATCH",
-        f"{API}/repos/{OWNER}/{REPO}/issues/{number}",
+        f"{API}/repos/{book.repo}/issues/{number}",
         token=token,
         payload={"state": "closed"},
     )
 
 
-def drop_label(token, number, label):
+def drop_label(token, book, number, label):
     """Remove a label; a missing label is not an error worth surfacing."""
-    url = (f"{API}/repos/{OWNER}/{REPO}/issues/{number}/labels/"
+    url = (f"{API}/repos/{book.repo}/issues/{number}/labels/"
            f"{urllib.parse.quote(label)}")
     result = _request("DELETE", url, token=token)
     if isinstance(result, Problem):
@@ -326,26 +368,26 @@ def drop_label(token, number, label):
     return result
 
 
-def accept_change(token, number, title):
+def accept_change(token, book, number, title):
     """Fold a proposed change into the drafts area.
 
-    Squashed, so one accepted change is one commit on `drafts` however many
+    Squashed, so one accepted change is one commit on the drafts branch however many
     times its author saved while writing it. This puts the change in the drafts
     area and nowhere else; getting it from there to readers is the job of the
     publish request below.
     """
     return _request(
         "PUT",
-        f"{API}/repos/{OWNER}/{REPO}/pulls/{number}/merge",
+        f"{API}/repos/{book.repo}/pulls/{number}/merge",
         token=token,
         payload={"merge_method": "squash", "commit_title": title},
     )
 
 
-def close_change(token, number):
+def close_change(token, book, number):
     return _request(
         "PATCH",
-        f"{API}/repos/{OWNER}/{REPO}/pulls/{number}",
+        f"{API}/repos/{book.repo}/pulls/{number}",
         token=token,
         payload={"state": "closed"},
     )
@@ -354,20 +396,21 @@ def close_change(token, number):
 
 # --- the one door from the drafts area to the live book ----------------------
 #
-# `drafts` is long-lived and shared: an accepted change lands there, and so does
-# every draft written in the browser CMS. So there is exactly one pull request
-# from `drafts` into `main` at a time, and it carries whatever `drafts` holds at
+# The drafts branch is long-lived and shared: an accepted change lands there, and
+# so does every draft written in the browser CMS. So there is exactly one pull
+# request from the drafts branch into the live branch at a time, and it carries whatever `drafts` holds at
 # the moment it is looked at — not one change in isolation. Accepting reopens or
 # refreshes that one request rather than opening a second.
 
-def open_publish_request(token):
+def open_publish_request(token, book):
     """The pull request carrying the drafts to the live book, if one is open.
 
     Returns the pull request, None if there is none open, or a Problem.
     """
-    url = (f"{API}/repos/{OWNER}/{REPO}/pulls?state=open"
-           f"&base={urllib.parse.quote(LIVE_BRANCH)}"
-           f"&head={urllib.parse.quote(OWNER + ':' + DRAFTS_BRANCH)}&per_page=10")
+    url = (f"{API}/repos/{book.repo}/pulls?state=open"
+           f"&base={urllib.parse.quote(book.live_branch)}"
+           f"&head={urllib.parse.quote(book.owner + ':' + book.drafts_branch)}"
+           f"&per_page=10")
     result = _request("GET", url, token=token)
     if isinstance(result, Problem):
         return result
@@ -377,31 +420,32 @@ def open_publish_request(token):
     return None
 
 
-def drafts_ahead_of_live(token):
+def drafts_ahead_of_live(token, book):
     """What the drafts area holds that the live book does not.
 
     The reply carries `ahead_by`, the commits and the files, which is everything
     needed to describe the publish request truthfully.
     """
-    url = (f"{API}/repos/{OWNER}/{REPO}/compare/"
-           f"{urllib.parse.quote(LIVE_BRANCH)}...{urllib.parse.quote(DRAFTS_BRANCH)}")
+    url = (f"{API}/repos/{book.repo}/compare/"
+           f"{urllib.parse.quote(book.live_branch)}..."
+           f"{urllib.parse.quote(book.drafts_branch)}")
     return _request("GET", url, token=token)
 
 
-def create_publish_request(token, title, body):
+def create_publish_request(token, book, title, body):
     return _request(
         "POST",
-        f"{API}/repos/{OWNER}/{REPO}/pulls",
+        f"{API}/repos/{book.repo}/pulls",
         token=token,
         payload={"title": title, "body": body,
-                 "head": DRAFTS_BRANCH, "base": LIVE_BRANCH},
+                 "head": book.drafts_branch, "base": book.live_branch},
     )
 
 
-def update_publish_request(token, number, title, body):
+def update_publish_request(token, book, number, title, body):
     return _request(
         "PATCH",
-        f"{API}/repos/{OWNER}/{REPO}/pulls/{number}",
+        f"{API}/repos/{book.repo}/pulls/{number}",
         token=token,
         payload={"title": title, "body": body},
     )
@@ -412,7 +456,7 @@ def update_publish_request(token, number, title, body):
 _BLOCKED_STATES = ("blocked", "draft")
 
 
-def mergeability(token, number, tries=1, pause=1.5):
+def mergeability(token, book, number, tries=1, pause=1.5):
     """Whether a pull request can be merged as it stands.
 
     The service works this out in the background, so for a moment after a pull
@@ -424,7 +468,7 @@ def mergeability(token, number, tries=1, pause=1.5):
     author is told that rather than told it is fine.
     """
     for attempt in range(max(1, tries)):
-        pr = _request("GET", f"{API}/repos/{OWNER}/{REPO}/pulls/{number}",
+        pr = _request("GET", f"{API}/repos/{book.repo}/pulls/{number}",
                       token=token)
         if isinstance(pr, Problem):
             return "unknown"
@@ -439,17 +483,17 @@ def mergeability(token, number, tries=1, pause=1.5):
     return "unknown"
 
 
-def publish(token, number, title):
+def publish(token, book, number, title):
     """Merge the drafts into the live book.
 
-    A merge commit, not a squash. `drafts` is long-lived, so it has to stay an
-    ancestor of `main`: squashing would rewrite the same work under a new commit
-    and leave `drafts` looking as though everything it had ever carried were
+    A merge commit, not a squash. The drafts branch is long-lived, so it has to
+    stay an ancestor of `main` (the live branch): squashing would rewrite the
+    same work under a new commit and leave the drafts branch looking as though everything it had ever carried were
     still unpublished, offering all of it again on the next accept.
     """
     return _request(
         "PUT",
-        f"{API}/repos/{OWNER}/{REPO}/pulls/{number}/merge",
+        f"{API}/repos/{book.repo}/pulls/{number}/merge",
         token=token,
         payload={"merge_method": "merge", "commit_title": title},
     )

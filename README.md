@@ -222,6 +222,27 @@ above) and **Waiting for you**.
 "Waiting for you" is a readable window onto the things other people have sent in.
 It exists so that you never have to visit a website to deal with them.
 
+### Which book
+
+Everything under "Waiting for you" belongs to **one book at a time**. The band
+just under the title always says which book that is, where it is kept, and which
+vault is open.
+
+- **With no vault open**, you choose the book. The tool lists only the books your
+  account can make changes to, and remembers your choice for next time. Press
+  **Change book** in the band to switch.
+- **With a vault open** — whether you opened it under Chapters or under "Waiting
+  for you" — **the vault decides the book**, and the book can't be changed until
+  you press **Close vault**. This is what makes it impossible to write one
+  book's suggestion into another book's chapter.
+- A vault the tool can't match to a registered book is **refused** with the
+  reason: for example, "This vault is a copy of *X*, but *Y* is kept in *Z*."
+  Nothing is written into it. A vault that doesn't claim to be any book (a folder
+  of your own chapters) still works under Chapters as normal.
+
+If the band says **"List of textbooks as of …"**, the tool could not fetch the
+current list and is using the last one it saw.
+
 ### Signing in, once
 
 The first time, press **Sign in**. The tool shows you a short code and opens a
@@ -233,9 +254,9 @@ under your own name, and you can withdraw the tool's access at any time from you
 account settings. Your sign-in is kept in this Mac's Keychain — not in a file,
 and never in your vault.
 
-If the technical contact has not yet put the sign-in identifier into
-**Settings**, the tool will say so and there is nothing you can do until they
-have. It is a one-off.
+The sign-in identifier comes with the list of textbooks, so there is normally
+nothing to set up. If the tool ever says it has not been set up for signing in,
+the technical contact can put an identifier into **Settings**.
 
 ### Suggestions from readers
 
@@ -265,8 +286,9 @@ in this tool: **only that one line changes**, and every other line of the chapte
 is left exactly as it was. If the wording appears twice, or not at all, the tool
 says so and leaves it to you rather than guessing.
 
-For this to work the tool needs to know where your chapters are. There is a
-**Choose my chapters folder** button at the bottom of the list.
+For this to work the tool needs the book's vault open. There is an **Open the
+vault** button at the bottom of the list. The tool only ever changes a chapter in
+a vault it has just checked is the same book the suggestion was sent to.
 
 ### Draft changes
 
@@ -354,8 +376,9 @@ glossary suggestions. You do not need one — the ordinary checks work perfectly
 their own, and if DeepSeek is ever unavailable the tool quietly carries on
 without it and tells you so.
 
-The second is the **sign-in identifier** for "Waiting for you". The technical
-contact gives you this once; it is not a password and not a secret.
+The second is the **sign-in identifier** for "Waiting for you". It normally comes
+with the list of textbooks and needs nothing from you; one pasted here takes
+precedence. It is not a password and not a secret.
 
 Your DeepSeek key and your sign-in are both stored in this Mac's Keychain, not in
 a file and never in your vault. The only thing ever sent to DeepSeek is the text

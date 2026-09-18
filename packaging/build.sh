@@ -151,6 +151,18 @@ cp -R "$ROOT/app" "$APP/Contents/Resources/app"
 cp "$ROOT/launch.py" "$APP/Contents/Resources/launch.py"
 printf '%s\n' "$VERSION" > "$APP/Contents/Resources/VERSION"
 
+# The list of textbooks, as it stands today, for a Mac that has never been
+# online with this app. The app fetches a fresh copy every time it starts and
+# only falls back to this one, saying how old it is. Checked by the app's own
+# parser before it is bundled, so a broken list fails the build, not the author.
+REGISTRY_URL="${REGISTRY_URL:-https://raw.githubusercontent.com/textbookproject2026-alt/textbook-registry/main/registry.json}"
+note "bundling the list of textbooks"
+curl -fsSL "$REGISTRY_URL" -o "$APP/Contents/Resources/app/registry.bundled.json" \
+  || die "could not fetch the list of textbooks from $REGISTRY_URL"
+python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from app import registry; registry.parse(open(sys.argv[2]).read())' \
+  "$ROOT" "$APP/Contents/Resources/app/registry.bundled.json" \
+  || die "the list of textbooks did not pass the app's own checks"
+
 # Trim the parts of Python a tool like this never touches.
 PYLIB="$APP/Contents/Resources/python/lib/python${PYTHON_VERSION}"
 rm -rf "$PYLIB/test" "$PYLIB/idlelib" "$PYLIB/tkinter" "$PYLIB/turtledemo" \

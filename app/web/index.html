@@ -23,6 +23,24 @@
   </div>
 </header>
 
+<!-- Which book everything on screen belongs to. Always visible. -->
+<div id="bookbar">
+  <div class="bookbar-inner">
+    <div class="bookbar-facts">
+      <p class="bookbar-line"><span class="bookbar-label">Book</span>
+        <span id="bookbar-book">No book chosen</span></p>
+      <p class="bookbar-line"><span class="bookbar-label">Vault</span>
+        <span id="bookbar-vault">None open</span></p>
+      <p class="bookbar-note hidden" id="bookbar-problem"></p>
+      <p class="bookbar-note quiet hidden" id="bookbar-registry"></p>
+    </div>
+    <div class="bookbar-actions">
+      <button class="link" id="bookbar-change">Change book</button>
+      <button class="link hidden" id="bookbar-close">Close vault</button>
+    </div>
+  </div>
+</div>
+
 <main>
 
 <!-- 0. first run only -->
@@ -400,9 +418,33 @@
   </div>
 </section>
 
+<!-- C1b. which book -->
+<section id="step-books" class="step hidden">
+  <h2>Which book are you working on?</h2>
+  <p>Everything under “Waiting for you” belongs to one book at a time. These are
+  the books your account can make changes to.</p>
+
+  <div id="books-locked" class="card hidden">
+    <p class="card-label">Your vault decides</p>
+    <p id="books-locked-text"></p>
+    <div class="actions tight">
+      <button id="books-close-vault">Close the vault and choose a book</button>
+    </div>
+  </div>
+
+  <p class="notice hidden" id="books-note"></p>
+  <ul class="queue" id="books-list"></ul>
+  <p class="quiet" id="books-hidden"></p>
+
+  <div class="actions">
+    <button class="link" id="books-back">Back to my chapters</button>
+  </div>
+</section>
+
 <!-- C2. the list -->
 <section id="step-console" class="step hidden">
   <h2>Waiting for you</h2>
+  <p class="for-book" id="console-book"></p>
   <p class="quiet" id="console-who"></p>
 
   <div id="console-problems" class="hidden"></div>
@@ -441,7 +483,7 @@
 
   <h3>Elsewhere</h3>
   <ul class="summary-list">
-    <li><strong>Reader discussion</strong> — every comment left in the margins of
+    <li id="discussion-item"><strong>Reader discussion</strong> — every comment left in the margins of
       the book.
       <a id="link-discussion" href="#" target="_blank" rel="noopener">Open the
       discussion list</a></li>
@@ -461,6 +503,7 @@
 <!-- C3. one suggestion -->
 <section id="step-suggestion" class="step hidden">
   <h2>A suggestion from a reader</h2>
+  <p class="for-book" id="sug-book"></p>
   <p class="quiet" id="sug-meta"></p>
 
   <div class="card">
@@ -486,6 +529,7 @@
 <!-- C4. one draft change -->
 <section id="step-draft" class="step hidden">
   <h2>A draft change</h2>
+  <p class="for-book" id="draft-book"></p>
   <p class="quiet" id="draft-meta"></p>
   <div id="draft-body"><div class="spinner"></div></div>
 
@@ -500,6 +544,7 @@
 <!-- C5. sending the drafts to the live book -->
 <section id="step-publish" class="step hidden">
   <h2>Send the drafts to the live book</h2>
+  <p class="for-book" id="publish-book"></p>
   <p class="quiet" id="publish-meta"></p>
   <div id="publish-body"><div class="spinner"></div></div>
 
