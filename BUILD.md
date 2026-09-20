@@ -304,7 +304,7 @@ failing.
 ## Which book (the registry)
 
 No book's repository, branches or site is written into the app. They come from
-`textbook-registry/registry.json` (see `platform-registry-design/DESIGN.md` §3d):
+`textbook-registry/registry.json` (see `textbook-registry/design/DESIGN.md` §3d):
 
 - **Fetched once per launch** from the registry's `main`
   (`app/registry.py`, `REGISTRY_URL`; `AA_REGISTRY_URL` overrides it for
