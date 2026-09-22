@@ -110,6 +110,27 @@ const bodies = {};
 
 let lastPreviewBody = null;
 let lastConvertBody = null;
+// What the fake server says about sending to the drafts area. Changed as the
+// run goes on: no push rights first, then an author who can push.
+let DRAFTS_STATUS = { available: false,
+  message: 'Your account can\'t make changes to “Book A” (example-org/book-a), so this chapter can\'t be sent to its drafts area.' };
+const DRAFTS_LOOK = {
+  repo: 'example-org/book-a', branch: 'drafts', head: 'h1',
+  chapter_path: 'chapters/Chapter 6.md', media_dir: 'assets/Chapter 6',
+  refused: null, exists: false, last: null, nothing_to_send: false,
+  removed: [], changed_lines: null,
+};
+const DRAFTS_MOVED = Object.assign({}, DRAFTS_LOOK, {
+  head: 'h2', exists: true, removed: ['image2.png'],
+  changed_lines: { removed: 3, added: 4 },
+  last: { who: 'cms-user', when: '2026-09-22T10:00:00Z', message: 'Update Chapter 6' },
+});
+let sendReplies = [];
+// Signing out and in again. The fake server refuses a sign-out when told to,
+// as the real one does when the Keychain still has the token afterwards.
+let SIGNED_IN = true;
+let signoutReply = null;
+let signinReply = { waiting: true, wait: 5 };
 // Flipped part-way through the run, to check the screen shown when the
 // converter is missing and the one shown once it has been installed.
 let IMPORT_READY = { ready: false, where: null, version: null, can_install: true };
@@ -119,7 +140,7 @@ const fetch = async (route, opts) => {
   const body = JSON.parse(opts.body || '{}');
   bodies[route] = body;
   if (route === '/api/books/choose') CURRENT_WS = body.slug === 'book-b' ? WS_B : WS_A;
-  if (route === '/api/vault/close') CURRENT_WS = WS_A;
+  if (route === '/api/vault/close' || route === '/api/books/switch') CURRENT_WS = WS_A;
   const reply = {
     '/api/env': {
       pandoc: true, deepseek: false, deepseek_hint: null, obsidian_running: false,
@@ -148,6 +169,7 @@ const fetch = async (route, opts) => {
       text: '# Chapter Six\n\nA paragraph.\n', folder: '/v/Chapters',
       media_rel: 'assets/Chapter 6',
       media: [{ rel: 'rId1.png', name: 'rId1.png', ext: 'png', size: 2048 }],
+      local_problem: null, drafts: DRAFTS_STATUS,
       counts: { lines: 3, words: 4, pictures: 1, headings: 1,
                 pipe_tables: 0, html_tables: 1, footnotes: 2 },
       notes: [
@@ -163,13 +185,24 @@ const fetch = async (route, opts) => {
       folder: '/v/Chapters',
     },
     '/api/import/cancel': { ok: true },
+    '/api/import/drafts-status': DRAFTS_STATUS,
+    '/api/import/drafts-check': DRAFTS_LOOK,
+    '/api/import/drafts-send': route === '/api/import/drafts-send'
+      ? sendReplies.shift() : null,
 
     '/api/workspace': CURRENT_WS,
     '/api/books': { books: [BOOK_A], hidden: 2, offline: false, note: '',
                     workspace: CURRENT_WS },
     '/api/books/choose': CURRENT_WS,
     '/api/vault/close': CURRENT_WS,
-    '/api/console/status': { configured: true, signed_in: true, who: 'The Author',
+    '/api/books/switch': CURRENT_WS,
+    '/api/account': CURRENT_WS,
+    '/api/console/signout': route === '/api/console/signout'
+      ? (signoutReply ? Object.assign({}, signoutReply, { workspace: CURRENT_WS }) : null) : null,
+    '/api/console/signin-start': { code: 'ABCD-1234', url: 'https://github.com/login/device', minutes: 15 },
+    '/api/console/signin-poll': signinReply,
+    '/api/console/status': { configured: true, signed_in: SIGNED_IN, who: 'The Author',
+                             login: SIGNED_IN ? 'author' : null,
                              keychain: true, workspace: CURRENT_WS },
     '/api/console/load': {
       book: CURRENT_WS.book, workspace: CURRENT_WS,
@@ -209,17 +242,22 @@ const fetch = async (route, opts) => {
       changed_lines: [4],
     }; })(),
   }[route] || {};
+  if (reply && reply.__refuse) {
+    return { ok: false, status: 400, json: async () => ({ error: reply.__refuse }) };
+  }
+  if (route === '/api/console/signout' && reply && !reply.__refuse) SIGNED_IN = false;
   return { ok: true, json: async () => reply };
 };
 
 const listeners = {};
 let beacons = 0;
 const ctx = {
-  document, fetch, console, setInterval, clearInterval, setTimeout,
+  document, fetch, console, setInterval, clearInterval, setTimeout, clearTimeout,
   encodeURIComponent,
   navigator: { sendBeacon: () => { beacons++; return true; } },
   window: {
     scrollTo() {},
+    open() {},
     addEventListener: (name, fn) => { listeners[name] = fn; },
   },
 };
@@ -401,6 +439,106 @@ function check(name, cond, got) {
   check('and it lands on the options screen, ready to be looked through',
         !els['step-options'].classList.contains('hidden'), 'wrong screen');
 
+  // --- sending a Word import to the drafts area -----------------------------
+
+  const said = n => [n.textContent, ...n.children.map(said)].join(' ');
+  check('an author without push rights is told before converting, on the import screen',
+        els['import-drafts-status'].textContent.includes("can't make changes"),
+        els['import-drafts-status'].textContent);
+  check('and then no send to drafts is offered for that chapter',
+        els['do-send-drafts'].disabled === true, els['do-send-drafts'].disabled);
+
+  DRAFTS_STATUS = { available: true,
+    message: 'Once it is converted you can send it to the drafts area of “Book A”.' };
+  await els['import-another'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('an author who can push is told where it can go, before converting',
+        els['import-drafts-status'].textContent.includes('drafts area of “Book A”'),
+        els['import-drafts-status'].textContent);
+  // Choosing the folder opens the vault, and the vault decides the book.
+  CURRENT_WS = WS_A_VAULT;
+  await els['choose-import-folder'].onclick();
+  await els['choose-docx'].onclick();
+  els['import-name'].value = 'Chapter 6.md';
+  await els['do-convert'].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('after converting, the drafts area is looked at for the current book',
+        calls.includes('/api/import/drafts-check') &&
+        bodies['/api/import/drafts-check'].book === 'book-a',
+        bodies['/api/import/drafts-check']);
+  check('the author is shown where on drafts the chapter will go',
+        els['import-drafts-where'].textContent.includes('chapters/Chapter 6.md') &&
+        els['import-drafts-where'].textContent.includes('“drafts”'),
+        els['import-drafts-where'].textContent);
+  check('nothing is sent until the author says they have looked',
+        els['do-send-drafts'].disabled === true, els['do-send-drafts'].disabled);
+  els['import-confirm'].checked = true;
+  els['import-confirm'].onchange({ target: els['import-confirm'] });
+  check('ticking the box offers both ways: the vault and the drafts area',
+        els['do-send-drafts'].disabled === false && els['do-import-save'].disabled === false,
+        [els['do-send-drafts'].disabled, els['do-import-save'].disabled]);
+
+  sendReplies = [{ moved: true, message: 'Nothing was sent. Something else changed the drafts area.',
+                   drafts: DRAFTS_MOVED }];
+  await els['do-send-drafts'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('the send carries the book and the drafts it was shown',
+        bodies['/api/import/drafts-send'].book === 'book-a' &&
+        bodies['/api/import/drafts-send'].head === 'h1', bodies['/api/import/drafts-send']);
+  check('if drafts moved, the author stays on the chapter and is told nothing was sent',
+        !els['step-import-preview'].classList.contains('hidden') &&
+        els['import-drafts-problem'].textContent.includes('Nothing was sent'),
+        els['import-drafts-problem'].textContent);
+  check('the fresh offer shows who changed the chapter and what sending replaces',
+        els['import-drafts-detail'].textContent.includes('cms-user') &&
+        els['import-drafts-detail'].textContent.includes('3 lines taken out, 4 put in'),
+        els['import-drafts-detail'].textContent);
+  check('and names the picture that would be taken out',
+        said(els['import-drafts-removed']).includes('image2.png'),
+        said(els['import-drafts-removed']));
+  check('the author has to look and say yes again',
+        els['import-confirm'].checked === false && els['do-send-drafts'].disabled === true,
+        [els['import-confirm'].checked, els['do-send-drafts'].disabled]);
+  els['import-confirm'].checked = true;
+  els['import-confirm'].onchange({ target: els['import-confirm'] });
+  check('replacing a chapter on drafts needs its own tick',
+        !els['import-replace-label'].classList.contains('hidden') &&
+        els['do-send-drafts'].disabled === true, els['do-send-drafts'].disabled);
+  els['import-replace'].checked = true;
+  els['import-replace'].onchange();
+  check('with both ticks, sending is offered again',
+        els['do-send-drafts'].disabled === false, els['do-send-drafts'].disabled);
+
+  sendReplies = [{ sent: true, sha: 'c0ffee', url: 'https://example.invalid/commit/c0ffee',
+                   repo: 'example-org/book-a', branch: 'drafts',
+                   chapter_path: 'chapters/Chapter 6.md', files: 1, removed: 1, saved: null }];
+  await els['do-send-drafts'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('the second send goes on the fresh offer, replacing on purpose',
+        bodies['/api/import/drafts-send'].head === 'h2' &&
+        bodies['/api/import/drafts-send'].replace === true, bodies['/api/import/drafts-send']);
+  check('once sent, the author is told it is in the drafts area, not the vault',
+        !els['step-import-done'].classList.contains('hidden') &&
+        els['import-done-title'].textContent === 'The chapter is in the drafts area',
+        els['import-done-title'].textContent);
+  check('and where it went, and that readers do not see it yet',
+        said(els['import-done-summary']).includes('chapters/Chapter 6.md') &&
+        said(els['import-done-summary']).includes("Readers don't see it"),
+        said(els['import-done-summary']));
+  check('the folder route is still there: it can be saved into the vault as well',
+        !els['import-other-way'].classList.contains('hidden') &&
+        els['import-other-way'].textContent === 'Save it into your vault as well',
+        els['import-other-way'].textContent);
+  check('going through the chapter is only offered once it is in the vault',
+        els['import-analyse'].classList.contains('hidden'), 'offered');
+  els['import-other-way'].onclick();
+  check('going back to save it asks for the tick again',
+        !els['step-import-preview'].classList.contains('hidden') &&
+        els['import-confirm'].checked === false && els['do-send-drafts'].disabled === true,
+        els['import-confirm'].checked);
+  CURRENT_WS = WS_NONE;
+  await ctx.refreshWorkspace();
+
   // --- the console: accepting is not publishing ------------------------------
 
   const text = n => [n.textContent, ...n.children.map(text)].join(' ');
@@ -495,9 +633,10 @@ function check(name, cond, got) {
   CURRENT_WS = WS_A_VAULT;
   await els['console-refresh'].onclick();
   await new Promise(r => setTimeout(r, 20));
-  check('with a vault open, the book can’t be changed from the bar',
-        els['bookbar-change'].classList.contains('hidden') &&
-        !els['bookbar-close'].classList.contains('hidden'), 'change still offered');
+  check('with a vault open, changing book is still offered, and says it closes the vault',
+        !els['bookbar-change'].classList.contains('hidden') &&
+        els['bookbar-change'].textContent.includes('closes this vault') &&
+        !els['bookbar-close'].classList.contains('hidden'), els['bookbar-change'].textContent);
   check('the bar says the vault is what decides',
         els['bookbar-vault'].textContent.includes('Vault A') &&
         els['bookbar-vault'].textContent.includes('decides the book'),
@@ -508,16 +647,29 @@ function check(name, cond, got) {
 
   await els['bookbar-change'].onclick();
   await new Promise(r => setTimeout(r, 30));
-  check('asking to change book with a vault open explains the vault decides',
+  check('changing book closes the vault and goes straight to choosing another',
+        calls.includes('/api/books/switch') &&
+        !els['step-books'].classList.contains('hidden') &&
+        els['books-locked'].classList.contains('hidden') &&
+        els['books-list'].children.every(li => !li.children[0].disabled),
+        calls.slice(-4));
+
+  // Reaching the list another way with a vault still open: its card does the
+  // same in one press.
+  CURRENT_WS = WS_A_VAULT;
+  await ctx.refreshWorkspace();
+  await ctx.openBookPicker();
+  await new Promise(r => setTimeout(r, 30));
+  check('with a vault open, the list explains the vault decides',
         !els['books-locked'].classList.contains('hidden') &&
         els['books-locked-text'].textContent.includes('close the vault first'),
         els['books-locked-text'].textContent);
-
+  const switchesBefore = calls.filter(c => c === '/api/books/switch').length;
   await els['books-close-vault'].onclick();
   await new Promise(r => setTimeout(r, 30));
-  check('closing the vault from there frees the choice',
-        calls.includes('/api/vault/close') &&
-        els['books-locked'].classList.contains('hidden'), calls);
+  check('its button closes the vault and frees the choice',
+        calls.filter(c => c === '/api/books/switch').length === switchesBefore + 1 &&
+        els['books-locked'].classList.contains('hidden'), calls.slice(-4));
 
   // Another book: whatever was counted for the last one goes.
   await els['books-list'].children[els['books-list'].children.length - 1]
@@ -544,6 +696,105 @@ function check(name, cond, got) {
         els['link-discussion'].href);
   check('nothing in the page names a book of its own',
         !/confused4now|textbookproject2026-alt\/textbook\b/.test(js), 'constant found');
+
+  // --- the account ---------------------------------------------------------
+
+  const ACCOUNT = { signed_in: true, login: 'dept-coordinator-test', name: 'Dept Coordinator' };
+  const WS_A_READONLY = Object.assign({}, WS_A_VAULT, {
+    book: Object.assign({}, BOOK_A, { access: 'read' }), account: ACCOUNT });
+  CURRENT_WS = WS_A_READONLY;
+  await ctx.refreshWorkspace();
+  check('the bar names the signed-in account',
+        text(els['bookbar-account']).includes('dept-coordinator-test') &&
+        !els['bookbar-signout'].classList.contains('hidden') &&
+        !els['bookbar-switch-account'].classList.contains('hidden'),
+        text(els['bookbar-account']));
+  const offer = els['bookbar-book'].children.find(c => c.textContent === 'Use a different account');
+  check('where the account can only read the book, switching account is offered right there',
+        text(els['bookbar-book']).includes('can read this book but not change it') && !!offer,
+        text(els['bookbar-book']));
+
+  // A sign-out the Keychain would not honour is reported, not hidden.
+  signoutReply = { __refuse: 'The sign-in could not be taken out of this Mac\'s Keychain, so you are still signed in.' };
+  els['error-text'].textContent = '';
+  await els['bookbar-signout'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('a sign-out that did not clear the Keychain says the author is still signed in',
+        els['error-text'].textContent.includes('still signed in') && SIGNED_IN === true,
+        els['error-text'].textContent);
+
+  // On the import screen, before converting.
+  DRAFTS_STATUS = { available: false, why: 'no_access',
+    message: 'Your account (dept-coordinator-test) can\'t make changes to “Book A”.' };
+  CURRENT_WS = WS_A_VAULT;
+  await els['import-another'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('on the import screen, an account without push rights is offered another account before converting',
+        !els['import-account-actions'].classList.contains('hidden') &&
+        els['import-switch-account'].textContent === 'Use a different account',
+        els['import-switch-account'].textContent);
+
+  signoutReply = { signed_in: false, was: 'dept-coordinator-test' };
+  await els['import-switch-account'].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('switching account signs out as a switch, and goes to sign-in',
+        bodies['/api/console/signout'].switching === true &&
+        !els['step-console-signin'].classList.contains('hidden'),
+        bodies['/api/console/signout']);
+  check('the sign-in screen says which account was signed out, and how to pick another on GitHub',
+        !els['signin-switching'].classList.contains('hidden') &&
+        els['signin-switching-text'].textContent.includes('dept-coordinator-test') &&
+        els['signin-switching-text'].textContent.includes('Keychain'),
+        els['signin-switching-text'].textContent);
+
+  // Signing in as the other account brings the author back to the import.
+  signinReply = { signed_in: true, who: 'Other Author', login: 'other-author', same_account: false };
+  SIGNED_IN = true;
+  DRAFTS_STATUS = { available: true, why: 'ok',
+    message: 'Once it is converted you can send it to the drafts area of “Book A”.' };
+  await els['signin-start'].onclick();
+  await new Promise(r => setTimeout(r, 2200));
+  check('once signed in as the other account, the author is back on the import screen',
+        !els['step-import'].classList.contains('hidden') &&
+        els['import-account-actions'].classList.contains('hidden'),
+        steps.filter(x => !els[x].classList.contains('hidden')));
+
+  // GitHub gave back the same account: the author is told, not left guessing.
+  signoutReply = { signed_in: false, was: 'other-author' };
+  await els['bookbar-switch-account'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  signinReply = { signed_in: true, who: 'Other Author', login: 'other-author', same_account: true };
+  SIGNED_IN = true;
+  els['error-text'].textContent = '';
+  await els['signin-start'].onclick();
+  await new Promise(r => setTimeout(r, 2200));
+  check('if GitHub signs the same account in again, the author is told why',
+        els['error-text'].textContent.includes('other-author again') &&
+        els['error-text'].textContent.includes('browser'),
+        els['error-text'].textContent);
+
+  // Settings has the same two actions.
+  await els['open-settings'].onclick();
+  check('Settings names the account and offers to sign out or use another',
+        els['settings-account'].textContent.includes('author') &&
+        !els['settings-account-actions'].classList.contains('hidden'),
+        els['settings-account'].textContent);
+  signoutReply = { signed_in: false, was: 'author' };
+  await els['settings-signout'].onclick();
+  check('signing out from Settings says so there',
+        els['settings-account'].textContent === 'Not signed in.' &&
+        els['settings-account-actions'].classList.contains('hidden'),
+        els['settings-account'].textContent);
+  els['settings-close'].onclick();
+
+  // --- where a new chapter goes -------------------------------------------
+
+  IMPORT_READY = { ready: true, folder: '/va/chapters', folder_name: 'chapters', chapters_here: 3 };
+  await els['pick-docx'].onclick();
+  check('with a vault open, a Word import goes in the book’s chapters folder unless the author picks another',
+        els['folder-chosen'].textContent.startsWith('/va/chapters') &&
+        els['folder-chosen'].textContent.includes('3 chapters'),
+        els['folder-chosen'].textContent);
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

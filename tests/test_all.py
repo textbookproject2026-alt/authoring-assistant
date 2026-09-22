@@ -1759,6 +1759,675 @@ for _d in (_va, _vb, _vmis, _vplain, _va2, _sess_root):
     shutil.rmtree(_d, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# "Send to drafts" for a Word import (BOOK-ONE-TO-QUARTZ.md §8 step 1).
+#
+# One commit on the drafts branch, made as the signed-in author, holding the
+# chapter and its pictures. The branch is moved without force on top of what
+# was read, so if anyone else moved it in between, nothing is sent, nothing of
+# theirs is lost, and the author is shown the drafts area again.
+# ---------------------------------------------------------------------------
+
+import hashlib as _hashlib  # noqa: E402
+import posixpath as _posixpath  # noqa: E402
+
+from app import drafts as _drafts  # noqa: E402
+
+
+class _GitRepo(_Books):
+    """One book's repository, kept in memory, answering the Git Data API."""
+
+    def __init__(self, repo, files, perms=None, **kw):
+        super().__init__(perms or {repo: "write"}, **kw)
+        self.repo = repo
+        self.base = f"{_github.API}/repos/{repo}"
+        self.blobs, self.trees, self.commits = {}, {}, {}
+        self.branches = {}
+        self.before_move = None    # another client, acting just before our move
+        root = self._commit(self._tree(self._files(files)), [], "start", "maint")
+        self.branches = {"main": root, "drafts": root}
+
+    def _files(self, files):
+        out = {}
+        for path, data in files.items():
+            data = data.encode() if isinstance(data, str) else data
+            sha = _drafts.blob_sha(data)
+            self.blobs[sha] = data
+            out[path] = sha
+        return out
+
+    def _tree(self, files):
+        sha = _hashlib.sha1(json.dumps(sorted(files.items())).encode()).hexdigest()
+        self.trees[sha] = dict(files)
+        return sha
+
+    def _commit(self, tree, parents, message, who):
+        sha = _hashlib.sha1(json.dumps([tree, parents, message, who,
+                                         len(self.commits)]).encode()).hexdigest()
+        self.commits[sha] = {"tree": tree, "parents": parents,
+                             "message": message, "who": who}
+        return sha
+
+    def files(self, branch="drafts"):
+        tree = self.trees[self.commits[self.branches[branch]]["tree"]]
+        return {p: self.blobs[s] for p, s in tree.items()}
+
+    def push(self, who, changes, message="Update from the browser editor"):
+        """Someone else writes to drafts, as the browser editor would."""
+        files = dict(self.trees[self.commits[self.branches["drafts"]]["tree"]])
+        for path, data in changes.items():
+            if data is None:
+                files.pop(path, None)
+            else:
+                files.update(self._files({path: data}))
+        self.branches["drafts"] = self._commit(
+            self._tree(files), [self.branches["drafts"]], message, who)
+
+    def _ancestors(self, sha):
+        seen, todo = set(), [sha]
+        while todo:
+            s = todo.pop()
+            if s not in seen:
+                seen.add(s)
+                todo.extend(self.commits[s]["parents"])
+        return seen
+
+    def request(self, method, url, token=None, payload=None, accept=None):
+        if not url.startswith(self.base + "/"):
+            return super().request(method, url, token, payload, accept)
+        self.calls.append((method, url, payload))
+        rest = url[len(self.base) + 1:]
+        if method == "GET" and rest.startswith("git/ref/heads/"):
+            name = urllib.parse.unquote(rest[len("git/ref/heads/"):])
+            if name not in self.branches:
+                return _github.Problem("gone", code=404)
+            return {"object": {"sha": self.branches[name]}}
+        if method == "GET" and rest.startswith("git/commits/"):
+            return {"tree": {"sha": self.commits[rest.split("/")[2]]["tree"]}}
+        if method == "GET" and rest.startswith("git/trees/"):
+            files = self.trees[rest.split("/")[2].split("?")[0]]
+            entries, dirs = [], set()
+            for path, sha in files.items():
+                entries.append({"path": path, "type": "blob", "sha": sha})
+                parts = path.split("/")[:-1]
+                for i in range(1, len(parts) + 1):
+                    dirs.add("/".join(parts[:i]))
+            entries += [{"path": d, "type": "tree", "sha": "t"} for d in dirs]
+            return {"tree": entries, "truncated": False}
+        if method == "GET" and rest.startswith("git/blobs/"):
+            return {"content": base64.b64encode(
+                self.blobs[rest.split("/")[2]]).decode()}
+        if method == "GET" and rest.startswith("commits?"):
+            q = urllib.parse.parse_qs(rest.split("?", 1)[1])
+            path, sha = q["path"][0], q["sha"][0]
+            for c in self._walk(sha):
+                parents = self.commits[c]["parents"]
+                mine = self.trees[self.commits[c]["tree"]].get(path)
+                before = (self.trees[self.commits[parents[0]]["tree"]].get(path)
+                          if parents else None)
+                if mine != before:
+                    info = self.commits[c]
+                    return [{"commit": {"message": info["message"],
+                                        "author": {"name": info["who"],
+                                                   "date": "2026-09-22T10:00:00Z"}},
+                             "author": {"login": info["who"]}}]
+            return []
+        if method == "POST" and rest == "git/blobs":
+            data = base64.b64decode(payload["content"])
+            sha = _drafts.blob_sha(data)
+            self.blobs[sha] = data
+            return {"sha": sha}
+        if method == "POST" and rest == "git/trees":
+            files = dict(self.trees[payload["base_tree"]])
+            for e in payload["tree"]:
+                if e["sha"] is None:
+                    files.pop(e["path"], None)
+                else:
+                    files[e["path"]] = e["sha"]
+            return {"sha": self._tree(files)}
+        if method == "POST" and rest == "git/commits":
+            # No author in the request: the service makes it the token's owner.
+            who = payload.get("author", {}).get("name") or f"owner-of-{token}"
+            sha = self._commit(payload["tree"], payload["parents"],
+                               payload["message"], who)
+            return {"sha": sha, "html_url": f"https://example.invalid/commit/{sha}"}
+        if method == "PATCH" and rest.startswith("git/refs/heads/"):
+            if self.before_move:
+                self.before_move()
+                self.before_move = None
+            name = urllib.parse.unquote(rest[len("git/refs/heads/"):])
+            if not payload.get("force") and \
+                    self.branches[name] not in self._ancestors(payload["sha"]):
+                return _github.Problem("Update is not a fast forward", code=422)
+            self.branches[name] = payload["sha"]
+            return {"object": {"sha": payload["sha"]}}
+        return _github.Problem("not faked: " + rest, code=500)
+
+    def _walk(self, sha):
+        while sha:
+            yield sha
+            parents = self.commits[sha]["parents"]
+            sha = parents[0] if parents else None
+
+
+# --- building the tree -------------------------------------------------------
+
+_PNG1, _PNG2 = b"\x89PNG one", b"\x89PNG two"
+_t = _drafts.build_tree("chapters/c.md", b"# C\n", "assets/c",
+                        {"image1.png": _PNG1, "image2.png": _PNG2}, {})
+check("a new chapter's tree holds the chapter and every picture",
+      [e["path"] for e in _t] ==
+      ["chapters/c.md", "assets/c/image1.png", "assets/c/image2.png"] and
+      all(e["data"] is not None for e in _t), _t)
+_on = {"chapters/c.md": _drafts.blob_sha(b"# C old\n"),
+       "assets/c/image1.png": _drafts.blob_sha(_PNG1),
+       "assets/c/image2.png": _drafts.blob_sha(_PNG2)}
+_t = _drafts.build_tree("chapters/c.md", b"# C\n", "assets/c",
+                        {"image1.png": _PNG1}, _on)
+check("a picture removed since the last import is taken out of drafts",
+      {"path": "assets/c/image2.png", "sha": None, "data": None} in _t, _t)
+check("a picture that hasn't changed isn't sent again",
+      "assets/c/image1.png" not in [e["path"] for e in _t], _t)
+check("the chapter itself is replaced when its text changed",
+      [e["path"] for e in _t if e["data"]] == ["chapters/c.md"], _t)
+check("a picture in a folder of its own inside the pictures folder is kept there",
+      [e["path"] for e in _drafts.build_tree(
+          "c.md", b"x", "assets/c", {"sub/fig.png": _PNG1}, {})][1]
+      == "assets/c/sub/fig.png")
+check("sending exactly what drafts already has builds nothing",
+      _drafts.build_tree("chapters/c.md", b"# C\n", "assets/c",
+                         {"image1.png": _PNG1},
+                         {"chapters/c.md": _drafts.blob_sha(b"# C\n"),
+                          "assets/c/image1.png": _drafts.blob_sha(_PNG1)}) == [])
+check("a file of the same name outside the pictures folder is never touched",
+      _drafts.build_tree("chapters/c.md", b"# C\n", "assets/c", {},
+                         {"assets/c.png": "x", "assets/cc/i.png": "y"})
+      == [{"path": "chapters/c.md", "sha": _drafts.blob_sha(b"# C\n"),
+           "data": b"# C\n"}])
+check("a file's hash is worked out the way the service works it out",
+      _drafts.blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a")
+
+
+def _word_vault(slug, remote, content=""):
+    """A book checkout whose vault is its top folder, or a `content` folder in it."""
+    root = _make_book_vault(slug, remote)
+    vault = os.path.join(root, content) if content else root
+    os.makedirs(os.path.join(vault, "chapters"), exist_ok=True)
+    os.makedirs(os.path.join(vault, "assets"), exist_ok=True)
+    with open(os.path.join(vault, "glossary.md"), "w") as fh:
+        fh.write("# Glossary\n")
+    return root, os.path.join(vault, "chapters")
+
+
+_qroot, _qch = _word_vault("book-a", "git@github.com:example-org/book-a.git",
+                           content="content")
+check("the paths on drafts are the paths in the repository, not in the vault",
+      _drafts.repo_paths(_qroot, _qch, "New.md") ==
+      ("content/chapters/New.md", "content/assets/New"),
+      _drafts.repo_paths(_qroot, _qch, "New.md"))
+check("a chapter going outside the repository has no path on drafts",
+      _drafts.repo_paths(os.path.join(_qroot, "content", "chapters"),
+                         _qch, "New.md") is None)
+shutil.rmtree(_qroot, ignore_errors=True)
+
+
+# --- the author's path -------------------------------------------------------
+
+def _converted(folder, root, name, pictures, book="book-a"):
+    """What convert.convert() leaves behind, without needing pandoc here."""
+    stage = tempfile.mkdtemp(prefix="aa-import-")
+    media = []
+    for rel, data in pictures.items():
+        full = os.path.join(stage, _convert.STAGE_MEDIA, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as fh:
+            fh.write(data)
+        media.append({"rel": rel, "name": os.path.basename(rel), "ext": "png",
+                      "size": len(data)})
+    dest = _convert.media_destination(folder, name)
+    links = "".join(f"![]({dest['link_prefix']}/{r})\n\n" for r in pictures)
+    result = {"stage": stage, "md_name": name, "docx": "/w/" + name + ".docx",
+              "text": "# " + name[:-3] + "\n\nA paragraph from Word.\n\n" + links,
+              "media": media, "media_rel": dest["rel"] if media else None,
+              "media_target": dest["target"] if media else None,
+              "pandoc_warnings": [], "book": book, "vault": root,
+              "local_problem": None}
+    _server.IMPORT.update(folder=folder, result=result, docx=result["docx"])
+    return result
+
+
+_A = {"book": "book-a"}
+_wa, _wch = _word_vault("book-a", "git@github.com:example-org/book-a.git")
+_on_book(_BOOK)
+_server._open_vault(_wa)
+_FAKE_KEYCHAIN.pop(_keychain.ACCOUNT_GITHUB, None)
+_st = _server.r_import_drafts_status(None, {})
+check("before converting, an author who isn't signed in is told drafts is out",
+      _st["available"] is False and "aren't signed in" in _st["message"],
+      _st["message"])
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "a-token"
+_server.CONSOLE["access"]["book-a"] = "read"
+_st = _server.r_import_drafts_status(None, {})
+check("before converting, an author without push rights is told plainly",
+      _st["available"] is False and "can't make changes" in _st["message"]
+      and "example-org/book-a" in _st["message"]
+      and "saved into your vault" in _st["message"], _st["message"])
+_server.CONSOLE["access"].pop("book-a")
+_ro = _GitRepo("example-org/book-a", {}, perms={"example-org/book-a": "read"})
+_st = _with_service(_ro, lambda: _server.r_import_drafts_status(None, {}))
+check("and push rights are looked up when this Mac doesn't know them yet",
+      _st["available"] is False and "can't make changes" in _st["message"],
+      _st["message"])
+_server.CONSOLE["access"]["book-a"] = "write"
+_st = _server.r_import_drafts_status(None, {})
+check("an author who can push is told where it will go before starting",
+      _st["available"] and "“drafts”" in _st["message"]
+      and "example-org/book-a" in _st["message"], _st["message"])
+
+# A chapter of this name is already in the folder and drafts is out: refused
+# before converting, exactly as before.
+with open(os.path.join(_wch, "Taken.md"), "w") as fh:
+    fh.write("# Taken\n")
+_FAKE_KEYCHAIN.pop(_keychain.ACCOUNT_GITHUB, None)
+_server.IMPORT.update(docx="/no/such.docx", folder=_wch, result=None)
+check("with drafts out, a name already in the folder is still refused up front",
+      "already a chapter" in (_refused(lambda: _server.r_import_convert(
+          None, {"name": "Taken.md"})) or ""))
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "a-token"
+check("with drafts open, the same name goes on to be converted",
+      "already a chapter" not in (_refused(lambda: _server.r_import_convert(
+          None, {"name": "Taken.md"})) or ""))
+
+_DRAFTS_START = {
+    "chapters/chapter-01.md": "# One\n\nThe the words are here.\nLeave me.\n",
+    "assets/chapter-01/image1.png": b"\x89PNG old",
+    "glossary.md": "# Glossary\n",
+}
+_repo = _GitRepo("example-org/book-a", _DRAFTS_START)
+_res = _converted(_wch, _wa, "Chapter 7.md", {"image1.png": _PNG1})
+_start = _repo.branches["drafts"]
+_look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
+check("looking at drafts first changes nothing",
+      not _writes(_repo) and _repo.branches["drafts"] == _start)
+check("the author is shown where on drafts it goes",
+      _look["chapter_path"] == "chapters/Chapter 7.md"
+      and _look["media_dir"] == "assets/Chapter 7" and _look["branch"] == "drafts"
+      and not _look["exists"] and not _look["refused"], _look)
+
+_sent = _with_service(_repo, lambda: _server.r_import_drafts_send(
+    None, dict(_A, head=_look["head"])))
+_new = _repo.branches["drafts"]
+_commits = [c for c in _repo.calls if c[0] == "POST" and c[1].endswith("/git/commits")]
+_moves = [c for c in _repo.calls if c[0] == "PATCH"]
+check("a Word import with a picture makes exactly one commit on drafts",
+      _sent["sent"] and len(_commits) == 1 and _repo.commits[_new]["parents"]
+      == [_start], _repo.commits[_new])
+check("the commit is the signed-in author's: no other author is named",
+      "author" not in _commits[0][2] and "committer" not in _commits[0][2]
+      and _repo.commits[_new]["who"] == "owner-of-a-token")
+check("only the drafts branch is moved, and never by force",
+      len(_moves) == 1 and _moves[0][1].endswith("/git/refs/heads/drafts")
+      and _moves[0][2]["force"] is False
+      and _repo.branches["main"] == _start, _moves)
+_after = _repo.files()
+check("the chapter and its picture are both in that one commit",
+      _after["chapters/Chapter 7.md"] == _res["text"].encode()
+      and _after["assets/Chapter 7/image1.png"] == _PNG1, sorted(_after))
+_link = urllib.parse.unquote(re.search(r"!\[\]\(([^)]+)\)", _res["text"]).group(1))
+check("the picture is at the path the chapter links to",
+      _posixpath.normpath(_posixpath.join("chapters", _link)) in _after, _link)
+check("every other file on drafts is byte-identical",
+      all(_after[p] == (d.encode() if isinstance(d, str) else d)
+          for p, d in _DRAFTS_START.items()))
+check("the author is told where it went and given the commit",
+      _sent["chapter_path"] == "chapters/Chapter 7.md" and _sent["url"]
+      and _sent["branch"] == "drafts", _sent)
+check("the Word import is still in the folder route's hands afterwards",
+      _server.IMPORT["result"] is _res and os.path.isdir(_res["stage"]))
+_saved = _server.r_import_save(None, {})
+check("and the same chapter can still be saved into the vault (Publish reads it)",
+      os.path.isfile(os.path.join(_wch, "Chapter 7.md"))
+      and os.path.isfile(os.path.join(_wa, "assets", "Chapter 7", "image1.png")),
+      _saved)
+_again = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
+check("sending the same import again finds nothing to send",
+      _again["nothing_to_send"] and _again["exists"], _again)
+
+# The same, from a real Word document, when this machine has pandoc.
+if _pandoc:
+    _png_src = os.path.join(_wch, "fig.png")
+    with open(_png_src, "wb") as fh:
+        fh.write(_ONE_PIXEL_PNG)
+    with open(os.path.join(_wch, "w.md"), "w") as fh:
+        fh.write("# Chapter Eleven\n\nWords.\n\n![A diagram](fig.png)\n")
+    _docx = os.path.join(_wch, "w.docx")
+    subprocess.run([_pandoc, "w.md", "-o", _docx], check=True, cwd=_wch,
+                   capture_output=True, timeout=120)
+    os.remove(os.path.join(_wch, "w.md"))
+    os.remove(_png_src)
+    _server.IMPORT.update(docx=_docx, folder=_wch, result=None)
+    _real = _with_service(_repo, lambda: _server.r_import_convert(
+        None, {"name": "Chapter 11.md"}))
+    _look = _with_service(_repo, lambda: _server.r_import_drafts_check(
+        None, dict(_A)))
+    _before = len([c for c in _repo.calls if c[1].endswith("/git/commits")])
+    _with_service(_repo, lambda: _server.r_import_drafts_send(
+        None, dict(_A, head=_look["head"])))
+    _after = _repo.files()
+    _link = urllib.parse.unquote(re.search(
+        r'(?:src="|\]\()([^")]+)', _real["text"]).group(1))
+    _pic = _posixpath.normpath(_posixpath.join("chapters", _link))
+    check("a real Word file with a picture makes one commit on drafts",
+          len([c for c in _repo.calls if c[0] == "POST"
+               and c[1].endswith("/git/commits")]) == _before + 1
+          and _after["chapters/Chapter 11.md"] == _real["text"].encode())
+    check("with the picture at the path the converted chapter links to",
+          _after.get(_pic) == _ONE_PIXEL_PNG, (_pic, sorted(_after)))
+    os.remove(_docx)
+
+# --- drafts moved between looking and sending --------------------------------
+
+_res = _converted(_wch, _wa, "Chapter 8.md", {"image1.png": _PNG1})
+_look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
+_repo.before_move = lambda: _repo.push("cms-user", {
+    "chapters/chapter-01.md": "# One\n\nFixed in the browser.\nLeave me.\n"})
+_before_writes = len(_repo.calls)
+_moved = _with_service(_repo, lambda: _server.r_import_drafts_send(
+    None, dict(_A, head=_look["head"])))
+_theirs = _repo.branches["drafts"]
+check("if drafts moved after it was read, sending is refused",
+      _moved.get("moved") and "Nothing was sent" in _moved["message"]
+      and "never writes over anyone else's work" in _moved["message"], _moved)
+check("and their change is still what drafts holds",
+      _repo.commits[_theirs]["who"] == "cms-user"
+      and _repo.files()["chapters/chapter-01.md"]
+      == b"# One\n\nFixed in the browser.\nLeave me.\n"
+      and "chapters/Chapter 8.md" not in _repo.files())
+check("the refusal comes with a fresh offer, read from drafts as it is now",
+      _moved["drafts"]["head"] == _theirs and _moved["drafts"]["head"]
+      != _look["head"] and not _moved["drafts"]["refused"], _moved["drafts"])
+check("the old offer can't be used once drafts has been read again",
+      "out of date" in (_refused(lambda: _with_service(
+          _repo, lambda: _server.r_import_drafts_send(
+              None, dict(_A, head=_look["head"])))) or "")
+      and _repo.branches["drafts"] == _theirs)
+_sent = _with_service(_repo, lambda: _server.r_import_drafts_send(
+    None, dict(_A, head=_moved["drafts"]["head"])))
+check("sending again on the fresh offer goes on top of their change",
+      _sent["sent"] and _repo.commits[_repo.branches["drafts"]]["parents"]
+      == [_theirs] and _repo.files()["chapters/chapter-01.md"]
+      == b"# One\n\nFixed in the browser.\nLeave me.\n")
+
+# Someone puts a chapter of the same name on drafts in between: the fresh
+# offer says so, and replacing it needs its own tick.
+_res = _converted(_wch, _wa, "Chapter 9.md", {})
+_look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
+_repo.before_move = lambda: _repo.push("cms-user", {
+    "chapters/Chapter 9.md": "# Nine, written in the browser\n"})
+_moved = _with_service(_repo, lambda: _server.r_import_drafts_send(
+    None, dict(_A, head=_look["head"])))
+check("a chapter of the same name appearing in between is shown on the new offer",
+      _moved.get("moved") and _moved["drafts"]["exists"]
+      and _moved["drafts"]["last"]["who"] == "cms-user", _moved)
+_head = _repo.branches["drafts"]
+check("and it is not replaced without the author saying so",
+      "Tick the box" in (_refused(lambda: _with_service(
+          _repo, lambda: _server.r_import_drafts_send(
+              None, dict(_A, head=_moved["drafts"]["head"])))) or "")
+      and _repo.branches["drafts"] == _head
+      and _repo.files()["chapters/Chapter 9.md"]
+      == b"# Nine, written in the browser\n")
+
+# --- bringing the same chapter in again --------------------------------------
+
+_repo2 = _GitRepo("example-org/book-a", {
+    "chapters/Chapter 5.md": "# Chapter 5\n\nOld paragraph.\n\nKept.\n",
+    "assets/Chapter 5/image1.png": _PNG1,
+    "assets/Chapter 5/image2.png": _PNG2,
+})
+_res = _converted(_wch, _wa, "Chapter 5.md", {"image1.png": _PNG1})
+_look = _with_service(_repo2, lambda: _server.r_import_drafts_check(None, dict(_A)))
+check("bringing a chapter in again says it replaces the one on drafts",
+      _look["exists"] and _look["changed_lines"]["removed"] >= 1
+      and _look["last"]["who"] == "maint", _look)
+check("and names the picture the Word document no longer has",
+      _look["removed"] == ["image2.png"], _look["removed"])
+_sent = _with_service(_repo2, lambda: _server.r_import_drafts_send(
+    None, dict(_A, head=_look["head"], replace=True)))
+_after = _repo2.files()
+check("a picture removed since the last import is gone from drafts",
+      "assets/Chapter 5/image2.png" not in _after
+      and _after["assets/Chapter 5/image1.png"] == _PNG1 and _sent["removed"] == 1,
+      sorted(_after))
+check("an unchanged picture isn't uploaded again",
+      not any(c[1].endswith("/git/blobs") and base64.b64decode(
+          c[2]["content"]) == _PNG1 for c in _repo2.calls if c[0] == "POST"))
+
+# A pictures folder on drafts with no chapter of that name belongs to something
+# else, and is never written into.
+_repo3 = _GitRepo("example-org/book-a", {"assets/Chapter 6/image1.png": _PNG2})
+_res = _converted(_wch, _wa, "Chapter 6.md", {"image1.png": _PNG1})
+_look = _with_service(_repo3, lambda: _server.r_import_drafts_check(None, dict(_A)))
+check("a pictures folder on drafts that belongs to something else is refused",
+      _look["refused"] and "belong to something else" in _look["refused"], _look)
+check("and sending anyway writes nothing",
+      _refused(lambda: _with_service(_repo3, lambda: _server.r_import_drafts_send(
+          None, dict(_A, head=_look["head"])))) and not _writes(_repo3))
+
+# --- one book's text never goes to another book's repository -----------------
+
+_repo4 = _GitRepo("example-org/book-a", {})
+_res = _converted(_wch, _wa, "Chapter 10.md", {})
+_look = _with_service(_repo4, lambda: _server.r_import_drafts_check(None, dict(_A)))
+_wb, _wbch = _word_vault("book-b", "https://github.com/example-org/book-b.git")
+_server.CONSOLE["access"]["book-b"] = "write"
+_server._open_vault(_wb)
+_msg = _refused(lambda: _with_service(_repo4, lambda: _server.r_import_drafts_send(
+    None, {"book": "book-b", "head": _look["head"]})))
+check("a chapter converted in book A's vault can't be sent once book B is open",
+      _msg and "different book or vault" in _msg and not _writes(_repo4), _msg)
+check("a page still showing book A can't send it either",
+      "different book" in (_refused(lambda: _with_service(
+          _repo4, lambda: _server.r_import_drafts_send(
+              None, dict(_A, head=_look["head"])))) or "")
+      and not _writes(_repo4))
+_server._open_vault(_wa)
+with open(os.path.join(_wa, "textbook.config.json"), "w") as fh:
+    json.dump({"slug": "book-b"}, fh)
+_msg = _refused(lambda: _with_service(_repo4, lambda: _server.r_import_drafts_send(
+    None, dict(_A, head=_look["head"]))))
+check("a vault whose book claim changed on disk sends nothing",
+      _msg and "changed after it was opened" in _msg and not _writes(_repo4), _msg)
+with open(os.path.join(_wa, "textbook.config.json"), "w") as fh:
+    json.dump({"slug": "book-a", "title": "ignored"}, fh)
+_server._open_vault(_wa)
+_server.CONSOLE["access"]["book-a"] = "read"
+check("an author who can't push to the book is refused, and nothing is sent",
+      "can't make changes" in (_refused(lambda: _with_service(
+          _repo4, lambda: _server.r_import_drafts_send(
+              None, dict(_A, head=_look["head"])))) or "")
+      and not _writes(_repo4))
+_server.CONSOLE["access"]["book-a"] = "write"
+
+_same = _registry.Book({"slug": "s", "status": "live", "content": {
+    "repo": "example-org/book-a", "live_branch": "main", "drafts_branch": "main"}})
+_p = _drafts.send("t", _same, {"head": "h", "tree": "t"},
+                  [{"path": "x.md", "sha": "s", "data": b"x"}], "m")
+check("a book whose drafts branch is its live branch is never written to",
+      isinstance(_p, _github.Problem) and "nothing was sent" in _p.message)
+
+_server._forget_import()
+check("clearing an import clears its temporary folder",
+      _server.IMPORT["result"] is None and not os.path.isdir(_res["stage"]))
+for _d in (_wa, _wb):
+    shutil.rmtree(_d, ignore_errors=True)
+_on_book(_BOOK)
+
+
+# --- signing out, and signing in as someone else ---
+
+import importlib.util as _ilu  # noqa: E402
+
+# The real keychain code, against a pretend `security` tool: the stubs above
+# replace it for every other check, so this copy is loaded on its own.
+_kspec = _ilu.spec_from_file_location("_real_keychain", _keychain.__file__)
+_realkc = _ilu.module_from_spec(_kspec)
+_kspec.loader.exec_module(_realkc)
+
+
+def _pretend_security(copies, deletable=True):
+    """`copies` tokens stored; each delete removes one, as the real tool does."""
+    held = ["tok"] * copies
+
+    def run(args, stdin_text=None):
+        if args[0] == "find-generic-password":
+            return (True, held[0] + "\n") if held else (False, "")
+        if args[0] == "delete-generic-password":
+            if held and deletable:
+                held.pop()
+                return True, ""
+            return False, ""
+        raise AssertionError(args)
+    return run, held
+
+
+_realkc._run, _held = _pretend_security(2)
+check("signing out removes every copy of the token, not just the first",
+      _realkc.forget(_realkc.ACCOUNT_GITHUB) is True and _held == [], _held)
+_realkc._run, _held = _pretend_security(1, deletable=False)
+check("a token the Keychain won't give up is reported as still there",
+      _realkc.forget(_realkc.ACCOUNT_GITHUB) is False and _held == ["tok"])
+
+_on_book(_BOOK)
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "old-token"
+_server.CONSOLE["login"] = "old-login"
+_so = _server.r_console_signout(None, {})
+check("signing out takes the token out of the Keychain",
+      _keychain.ACCOUNT_GITHUB not in _FAKE_KEYCHAIN and _server._token() is None,
+      _FAKE_KEYCHAIN)
+check("and the page is told nobody is signed in",
+      _so["workspace"]["account"] == {"signed_in": False, "login": None,
+                                      "name": None}, _so["workspace"]["account"])
+
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "stuck-token"
+_server.CONSOLE["login"] = "old-login"
+_real_delete = _keychain.delete
+_keychain.delete = lambda account: False
+_msg = _refused(lambda: _server.r_console_signout(None, {}))
+_keychain.delete = _real_delete
+check("a sign-out the Keychain refused says so, rather than looking signed out",
+      "still signed in" in (_msg or "") and
+      _FAKE_KEYCHAIN.get(_keychain.ACCOUNT_GITHUB) == "stuck-token", _msg)
+
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "old-token"
+_server.CONSOLE.update(login="old-login", who="Old", access={"book-a": "read"})
+_so = _server.r_console_signout(None, {"switching": True})
+check("switching account signs the old one out and remembers who it was",
+      _so["was"] == "old-login" and _server.CONSOLE["leaving"] == "old-login"
+      and _server.CONSOLE["access"] == {} and _server._token() is None)
+
+_real_poll, _real_whoami = _github.poll_signin, _github.whoami
+
+
+def _sign_in_as(login):
+    _server.CONSOLE["signin"] = {"device_code": "d", "interval": 2,
+                                 "deadline": time.time() + 60}
+    _github.poll_signin = lambda client, code: {"token": "tok-" + login}
+    _github.whoami = lambda token: {"login": login, "name": login.title()}
+    try:
+        return _server.r_console_signin_poll(None, {})
+    finally:
+        _github.poll_signin, _github.whoami = _real_poll, _real_whoami
+
+
+_si = _sign_in_as("Old-Login")
+check("if GitHub signs the same account back in, the page is told",
+      _si["same_account"] is True and _si["login"] == "Old-Login", _si)
+_server.r_console_signout(None, {"switching": True})
+_si = _sign_in_as("other-author")
+check("signing in as a different account keeps the new one, and says so",
+      _si["same_account"] is False and
+      _FAKE_KEYCHAIN.get(_keychain.ACCOUNT_GITHUB) == "tok-other-author" and
+      _server.CONSOLE["leaving"] is None, _si)
+_acc = _server.r_account(None, {})["account"]
+check("the bar is told the new account's name",
+      _acc == {"signed_in": True, "login": "other-author",
+               "name": "Other-Author"}, _acc)
+_server.CONSOLE.update(login=None, who=None)
+_acc = _with_service(_Books(_PERMS), lambda: _server.r_account(None, {}))["account"]
+check("when the name isn't known yet, it is asked for",
+      _acc["login"] == "author", _acc)
+_so = _server.r_console_signout(None, {})
+check("a plain sign-out doesn't pretend the author is switching",
+      _server.CONSOLE["leaving"] is None)
+
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "a-token"
+_on_book(_BOOK)
+_server.CONSOLE["access"]["book-a"] = "read"
+_wa, _wch = _word_vault("book-a", "git@github.com:example-org/book-a.git")
+_server._open_vault(_wa)
+_server.IMPORT.update(folder=None, result=None, docx=None)
+_st = _server.r_import_drafts_status(None, {})
+check("on the import screen, a read-only account is said to be the reason",
+      _st["why"] == "no_access" and "different account" in _st["message"], _st)
+_FAKE_KEYCHAIN.pop(_keychain.ACCOUNT_GITHUB, None)
+check("and not being signed in is told apart from it",
+      _server.r_import_drafts_status(None, {})["why"] == "signed_out")
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "a-token"
+_server.CONSOLE["access"]["book-a"] = "write"
+
+# --- where a Word import goes, until the author says otherwise ---
+
+_server.IMPORT.update(folder=None, result=None, docx=None)
+_ist = _server.r_import_status(None, {})
+check("with a vault open, a Word import goes in the book's chapters folder",
+      _ist["folder"] == os.path.join(_wa, "chapters") and
+      _server.IMPORT["folder"] == os.path.join(_wa, "chapters"), _ist["folder"])
+_starts = []
+
+
+def _chooser(prompt, start):
+    _starts.append(start)
+    return _wa, None
+
+
+_server.picker.choose_folder = _chooser
+_server.IMPORT["folder"] = None
+_pf = _server.r_import_pick_folder(None, {})
+_server.picker.choose_folder = _no_chooser
+check("the folder chooser opens in the chapters folder, not the top of the vault",
+      _starts == [os.path.join(_wa, "chapters")], _starts)
+check("choosing the top of the vault anyway is pointed out",
+      _pf["at_top"] is True, _pf)
+_server.IMPORT["folder"] = os.path.join(_wa, "chapters")
+check("a folder the author picked is kept, not put back to the default",
+      _server.r_import_status(None, {})["folder"] == os.path.join(_wa, "chapters")
+      and (_server.IMPORT.update(folder=_wa) or
+           _server.r_import_status(None, {})["folder"] == _wa))
+_server._open_vault(_vplain)
+_server.IMPORT["folder"] = None
+check("a vault with no chapters folder of the import kind gets no default",
+      _server.r_import_status(None, {})["folder"] is None)
+
+# --- changing book ---
+
+_server._open_vault(_wa)
+_server.CONSOLE["access"].update({"book-a": "write", "book-b": "write"})
+_res = _converted(_wch, _wa, "Moving.md", {})
+_ws = _server.r_books_switch(None, {})
+check("changing book closes the vault that decided it",
+      _ws["vault"] is None and _ws["locked"] is False, _ws)
+check("and drops the Word import that was going into it",
+      _server.IMPORT["folder"] is None and _server.IMPORT["result"] is None
+      and not os.path.isdir(_res["stage"]))
+check("another book can then be chosen",
+      _server.r_books_choose(None, {"slug": "book-b"})["book"]["slug"] == "book-b")
+check("changing book with no vault open changes nothing",
+      _server.r_books_switch(None, {})["book"]["slug"] == "book-b")
+shutil.rmtree(_wa, ignore_errors=True)
+_on_book(_BOOK)
+
+
 # --- secrets ---
 
 with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

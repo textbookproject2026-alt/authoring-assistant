@@ -114,8 +114,9 @@ If a chapter still lives in Word, the tool can turn it into a chapter in your
 vault. Press **A Word document** on the first screen.
 
 You choose three things: the Word document, the folder in your vault it should go
-into, and what the chapter should be called. The name is filled in from the Word
-file's own name, and you can change it.
+into, and what the chapter should be called. With a vault open, the folder
+starts as the book's **chapters** folder; choose another if you want. The name is
+filled in from the Word file's own name, and you can change it.
 
 Then you are shown **the whole converted chapter before anything is written**,
 together with a list of the things worth checking. Nothing reaches your vault
@@ -123,6 +124,27 @@ until you have read it and ticked the box.
 
 Your Word document is never changed and never moved. It stays exactly where it
 is, and you can go back to it at any time.
+
+### Sending it to the drafts area
+
+If you are signed in to the console and can make changes to the book, the
+converted chapter can also go straight to the book's **drafts area**, the same
+place the browser editor writes to. Press **Send to drafts** instead of, or as
+well as, **Save this chapter**. The chapter and its pictures arrive as one
+change, made by you, and readers don't see it until the drafts go live.
+
+The import screen tells you before you convert whether this is open to you. If
+your account can't change the book, it says so there, offers **Use a different
+account**, and you can still save the chapter into your vault.
+
+- **Bringing a chapter in again** replaces the one of that name in the drafts
+  area. You are shown who last changed it and how many lines differ, any
+  pictures the Word document no longer has are listed (they are taken out), and
+  you tick a second box to say yes.
+- **If anyone else changes the drafts area while you are reading** (the
+  browser editor, say), nothing is sent. The tool looks again, shows you what
+  is there now, and you press **Send to drafts** again. It never writes over
+  anyone else's work.
 
 ### What to expect
 
@@ -225,15 +247,16 @@ It exists so that you never have to visit a website to deal with them.
 ### Which book
 
 Everything under "Waiting for you" belongs to **one book at a time**. The band
-just under the title always says which book that is, where it is kept, and which
-vault is open.
+just under the title always says which book that is, where it is kept, which
+vault is open, and which GitHub account you are signed in as.
 
 - **With no vault open**, you choose the book. The tool lists only the books your
   account can make changes to, and remembers your choice for next time. Press
   **Change book** in the band to switch.
 - **With a vault open** — whether you opened it under Chapters or under "Waiting
-  for you" — **the vault decides the book**, and the book can't be changed until
-  you press **Close vault**. This is what makes it impossible to write one
+  for you" — **the vault decides the book**. To work on a different book, press
+  **Change book (closes this vault)**: it closes the vault and takes you
+  straight to the list of books. This is what makes it impossible to write one
   book's suggestion into another book's chapter.
 - A vault the tool can't match to a registered book is **refused** with the
   reason: for example, "This vault is a copy of *X*, but *Y* is kept in *Z*."
@@ -253,6 +276,13 @@ You are signing in **as yourself**. Anything you accept or decline is recorded
 under your own name, and you can withdraw the tool's access at any time from your
 account settings. Your sign-in is kept in this Mac's Keychain — not in a file,
 and never in your vault.
+
+**Signing out, or using a different account.** The band and **Settings** both
+have **Sign out** and **Use a different account**. Either one takes the sign-in
+out of the Keychain, and the tool checks it is gone before saying so. GitHub
+signs in whichever account your web browser is signed in to, so to switch, sign
+out of GitHub in the browser too (the sign-in screen has a button for it). If
+GitHub hands back the same account, the tool tells you.
 
 The sign-in identifier comes with the list of textbooks, so there is normally
 nothing to set up. If the tool ever says it has not been set up for signing in,

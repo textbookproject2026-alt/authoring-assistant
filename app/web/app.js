@@ -466,7 +466,10 @@ document.getElementById('finish').onclick = async () => {
 const W = {
   docx: null,
   folder: null,
-  saved: null,      // { chapter, media } once written
+  converted: null,  // what the server said came out
+  saved: null,      // { chapter, media } once written into the vault
+  drafts: null,     // what sending to the drafts area would do, as last read
+  sent: null,       // { sha, url, ... } once sent to the drafts area
 };
 
 document.getElementById('pick-docx').onclick = enterImport;
@@ -478,8 +481,23 @@ async function enterImport() {
     document.getElementById('install-message').textContent = '';
     return show('step-import-setup');
   }
+  // Until the author picks another, a chapter goes in the book's chapters
+  // folder, not wherever the chooser happens to open.
+  if (st.folder && (!W.folder || W.folder.folder !== st.folder)) {
+    W.folder = { folder: st.folder, folder_name: st.folder_name,
+                 chapters_here: st.chapters_here || 0 };
+  } else if (!st.folder) {
+    W.folder = null;
+  }
   renderImportStep();
   show('step-import');
+}
+
+function describeFolder(f) {
+  return f.folder + (f.chapters_here
+    ? `  —  ${f.chapters_here} chapter${f.chapters_here === 1 ? '' : 's'} already here`
+    : '  —  no chapters here yet') +
+    (f.at_top ? '. This is the top of your vault; chapters usually go in its “chapters” folder.' : '');
 }
 
 document.getElementById('import-setup-back').onclick = () => show('step-choose');
@@ -522,9 +540,47 @@ function renderImportStep() {
   document.getElementById('docx-chosen').textContent =
     W.docx ? W.docx.docx_name : 'Nothing chosen yet.';
   document.getElementById('folder-chosen').textContent =
-    W.folder ? W.folder.folder : 'Nothing chosen yet.';
+    W.folder ? describeFolder(W.folder) : 'Nothing chosen yet.';
   checkImportReady();
+  refreshDraftsStatus();
 }
+
+/* Whether the chapter can go to the book's drafts area is said here, before
+   anything is converted, so an author whose account can't change the book is
+   told now and not after reading the whole chapter. */
+async function refreshDraftsStatus() {
+  const p = document.getElementById('import-drafts-status');
+  try {
+    const r = await api('/api/import/drafts-status', {});
+    p.textContent = r.message;
+    p.className = r.available ? '' : 'quiet';
+    showAccountFix('import-account-actions', 'import-switch-account', r.why);
+  } catch (e) { p.textContent = e.message; p.className = 'quiet bad'; }
+}
+
+/* When it is the account that stops a chapter going to drafts, the way to sign
+   in as another one is offered right there. */
+function showAccountFix(boxId, buttonId, why) {
+  const fix = why === 'no_access' || why === 'signed_out';
+  document.getElementById(boxId).classList.toggle('hidden', !fix);
+  document.getElementById(buttonId).textContent =
+    why === 'signed_out' ? 'Sign in' : 'Use a different account';
+}
+
+async function importAccountFix(from, why) {
+  if (why === 'signed_out') {
+    C.returnTo = from;
+    C.leaving = null;
+    return enterConsole();
+  }
+  await switchAccount(from);
+}
+document.getElementById('import-switch-account').onclick = async () => {
+  const r = await api('/api/import/drafts-status', {}).catch(() => ({}));
+  await importAccountFix('import', r.why);
+};
+document.getElementById('import-preview-switch-account').onclick = () =>
+  importAccountFix('import-preview', W.converted && W.converted.drafts && W.converted.drafts.why);
 
 function checkImportReady() {
   const name = document.getElementById('import-name').value.trim();
@@ -558,10 +614,8 @@ document.getElementById('choose-import-folder').onclick = async () => {
     if (r.error) return fail(r.error);
     await refreshWorkspace();
     W.folder = r;
-    document.getElementById('folder-chosen').textContent =
-      r.folder + (r.chapters_here
-        ? `  —  ${r.chapters_here} chapter${r.chapters_here === 1 ? '' : 's'} already here`
-        : '  —  no chapters here yet');
+    refreshDraftsStatus();
+    document.getElementById('folder-chosen').textContent = describeFolder(r);
     checkImportReady();
   } catch (e) { fail(e.message); }
 };
@@ -574,6 +628,7 @@ document.getElementById('do-convert').onclick = async () => {
     const r = await api('/api/import/convert', {
       name: document.getElementById('import-name').value.trim(),
     });
+    W.saved = null; W.sent = null; W.drafts = null;
     renderImportPreview(r);
     show('step-import-preview');
   } catch (e) { fail(e.message); show('step-import'); }
@@ -627,12 +682,129 @@ function renderImportPreview(r) {
     mBlock.classList.add('hidden');
   }
 
+  W.converted = r;
+  document.getElementById('import-local-note').textContent = r.local_problem
+    ? 'It can\'t be saved into your vault: ' + r.local_problem : '';
+  renderDraftsIntro(r.drafts);
+
   document.getElementById('import-confirm').checked = false;
   document.getElementById('do-import-save').disabled = true;
+  updateImportButtons();
+}
+
+function renderDraftsIntro(d) {
+  const block = document.getElementById('import-drafts-block');
+  block.classList.remove('hidden');
+  document.getElementById('import-drafts-where').textContent = d ? d.message : '';
+  showAccountFix('import-preview-account-actions', 'import-preview-switch-account',
+                 d && d.why);
+  document.getElementById('import-drafts-detail').textContent = '';
+  document.getElementById('import-drafts-removed').innerHTML = '';
+  document.getElementById('import-drafts-problem').textContent = '';
+  document.getElementById('import-replace-label').classList.add('hidden');
+  document.getElementById('import-replace').checked = false;
+  if (d && d.available) checkDrafts();
+}
+
+async function checkDrafts() {
+  document.getElementById('import-drafts-detail').textContent =
+    'Looking at the drafts area…';
+  try {
+    W.drafts = await api('/api/import/drafts-check', { book: bookSlug() });
+    renderDrafts(W.drafts);
+  } catch (e) {
+    W.drafts = null;
+    document.getElementById('import-drafts-detail').textContent = '';
+    document.getElementById('import-drafts-problem').textContent = e.message;
+  }
+  updateImportButtons();
+}
+
+function renderDrafts(d) {
+  const pics = W.converted && W.converted.media.length
+    ? ` Its pictures go in “${d.media_dir}”.` : '';
+  document.getElementById('import-drafts-where').textContent =
+    `It will go to the drafts area of ${d.repo} (“${d.branch}”) as “${d.chapter_path}”, ` +
+    `as one change made by you.` + pics;
+  let detail = '';
+  if (d.exists) {
+    const last = d.last
+      ? ` It was last changed by ${d.last.who || 'someone'}` +
+        (d.last.when ? ` on ${new Date(d.last.when).toLocaleString()}` : '') +
+        (d.last.message ? ` (“${d.last.message}”)` : '') + '.'
+      : '';
+    const lines = d.changed_lines
+      ? ` Sending replaces it with this one: ${d.changed_lines.removed} line` +
+        `${d.changed_lines.removed === 1 ? '' : 's'} taken out, ${d.changed_lines.added} put in.`
+      : ' Sending replaces it with this one.';
+    detail = 'A chapter of this name is already in the drafts area.' + last + lines +
+      ' Anything in it that isn\'t in your Word document — an edit made in the ' +
+      'browser editor, say — is replaced too. It stays in the drafts area\'s history.';
+  }
+  if (d.nothing_to_send) detail = 'The drafts area already has exactly this chapter ' +
+    'and these pictures, so there is nothing to send.';
+  document.getElementById('import-drafts-detail').textContent = detail;
+
+  const removed = document.getElementById('import-drafts-removed');
+  removed.innerHTML = '';
+  if (d.removed.length) {
+    removed.appendChild(el('li', '', 'These pictures are in the drafts area from an ' +
+      'earlier import and aren\'t in this one, so they will be taken out: ' +
+      d.removed.join(', ') + '.'));
+  }
+  document.getElementById('import-drafts-problem').textContent = d.refused || '';
+  document.getElementById('import-replace-label').classList.toggle(
+    'hidden', !(d.exists && !d.refused && !d.nothing_to_send));
+  document.getElementById('import-replace').checked = false;
+}
+
+function updateImportButtons(confirmed) {
+  const ok = confirmed === undefined
+    ? document.getElementById('import-confirm').checked : confirmed;
+  const r = W.converted || {};
+  document.getElementById('do-import-save').disabled =
+    !ok || !!r.local_problem || !!W.saved;
+  const d = W.drafts;
+  document.getElementById('do-send-drafts').disabled = !ok || !!W.sent || !d ||
+    !!d.refused || d.nothing_to_send ||
+    (d.exists && !document.getElementById('import-replace').checked);
 }
 
 document.getElementById('import-confirm').onchange = e => {
   document.getElementById('do-import-save').disabled = !e.target.checked;
+  updateImportButtons(e.target.checked);
+};
+document.getElementById('import-replace').onchange = () => updateImportButtons();
+
+document.getElementById('do-send-drafts').onclick = async () => {
+  document.getElementById('do-send-drafts').disabled = true;
+  show('step-working');
+  document.getElementById('working-note').textContent = 'Sending to the drafts area…';
+  try {
+    const r = await api('/api/import/drafts-send', {
+      book: bookSlug(), head: W.drafts.head,
+      replace: document.getElementById('import-replace').checked,
+    });
+    if (r.moved) {
+      /* Nothing was sent. What is there now is shown, and the author has to
+         look and say yes again. */
+      W.drafts = r.drafts;
+      renderDrafts(r.drafts);
+      document.getElementById('import-drafts-problem').textContent =
+        r.message + (r.drafts.refused ? ' ' + r.drafts.refused : '');
+      document.getElementById('import-confirm').checked = false;
+      updateImportButtons();
+      return show('step-import-preview');
+    }
+    W.sent = r;
+    renderImportDone();
+    show('step-import-done');
+  } catch (e) {
+    fail(e.message);
+    show('step-import-preview');
+    document.getElementById('import-confirm').checked = false;
+    updateImportButtons();
+  }
 };
 
 document.getElementById('import-preview-back').onclick = async () => {
@@ -647,31 +819,73 @@ document.getElementById('do-import-save').onclick = async () => {
   try {
     const r = await api('/api/import/save', {});
     W.saved = r;
-    renderImportDone(r);
+    renderImportDone();
     show('step-import-done');
   } catch (e) {
     fail(e.message);
     show('step-import-preview');
     document.getElementById('import-confirm').checked = false;
+    updateImportButtons();
   }
 };
 
-function renderImportDone(r) {
+function renderImportDone() {
+  const r = W.saved, s = W.sent;
+  document.getElementById('import-done-title').textContent =
+    r && s ? 'The chapter is in your vault and in the drafts area'
+      : s ? 'The chapter is in the drafts area' : 'The chapter is in your vault';
   const box = document.getElementById('import-done-summary');
   box.innerHTML = '';
   const list = el('ul', 'summary-list');
-  list.appendChild(el('li', '', `Your new chapter is ${r.chapter}`));
-  if (r.media) list.appendChild(el('li', '',
-    `Its pictures are in ${r.media_name || r.media}, inside your textbook`));
+  if (r) {
+    list.appendChild(el('li', '', `Your new chapter is ${r.chapter}`));
+    if (r.media) list.appendChild(el('li', '',
+      `Its pictures are in ${r.media_name || r.media}, inside your textbook`));
+  }
+  if (s) {
+    list.appendChild(el('li', '',
+      `It is in the drafts area of ${s.repo} (“${s.branch}”) as ${s.chapter_path}, ` +
+      `in one change made by you` +
+      (s.removed ? `, which also took out ${s.removed} picture${s.removed === 1 ? '' : 's'} ` +
+        'the Word document no longer has' : '') + '.'));
+    list.appendChild(el('li', '', 'Readers don\'t see it until the drafts go live.'));
+  }
   list.appendChild(el('li', '',
     'Your Word document has not been changed or moved. It is still where it was.'));
   box.appendChild(list);
-  box.appendChild(el('p', '',
+  if (s && s.url) {
+    const a = el('a', '', 'See the change');
+    a.href = s.url; a.target = '_blank'; a.rel = 'noopener';
+    box.appendChild(a);
+  }
+  if (r) box.appendChild(el('p', '',
     'If Obsidian is open, the new chapter appears in it on its own.'));
+
+  document.getElementById('import-analyse').classList.toggle('hidden', !r);
+  document.getElementById('import-analyse-card').classList.toggle('hidden', !r);
+  const other = document.getElementById('import-other-way');
+  const c = W.converted || {};
+  const canSend = c.drafts && c.drafts.available && !s;
+  const canSave = !c.local_problem && !r;
+  other.textContent = canSend ? 'Send it to drafts as well'
+    : canSave ? 'Save it into your vault as well' : '';
+  other.classList.toggle('hidden', !(canSend || canSave));
 }
 
+/* Back to the same converted chapter, to do the other of the two. It has to be
+   looked at and ticked again, and the drafts area is read again. */
+document.getElementById('import-other-way').onclick = () => {
+  document.getElementById('import-confirm').checked = false;
+  if (W.converted && W.converted.drafts && W.converted.drafts.available && !W.sent) {
+    checkDrafts();
+  }
+  updateImportButtons();
+  show('step-import-preview');
+};
+
 document.getElementById('import-another').onclick = () => {
-  W.docx = null;                  // the folder is kept: it is usually the same one
+  W.docx = null;
+  W.saved = null; W.sent = null; W.drafts = null; W.converted = null;                  // the folder is kept: it is usually the same one
   document.getElementById('import-name').value = '';
   renderImportStep();
   show('step-import');
@@ -754,8 +968,26 @@ async function openSettings() {
   await loadEnv();
   try { C.status = await api('/api/console/status', {}); } catch (e) { /* shown as absent */ }
   renderSettings();
+  renderSettingsAccount();
   document.getElementById('settings').classList.remove('hidden');
 }
+
+function renderSettingsAccount() {
+  const st = C.status || {};
+  const p = document.getElementById('settings-account');
+  p.textContent = st.signed_in
+    ? ('Signed in to GitHub as ' + (st.login || 'an account not yet checked') + '.')
+    : 'Not signed in.';
+  document.getElementById('settings-account-actions').classList.toggle('hidden', !st.signed_in);
+}
+
+document.getElementById('settings-switch-account').onclick = () => switchAccount();
+document.getElementById('settings-signout').onclick = async () => {
+  if (!(await signOut(false))) return;
+  try { C.status = await api('/api/console/status', {}); } catch (e) { /* shown as absent */ }
+  renderSettingsAccount();
+  if (onConsoleScreen()) await enterConsole();
+};
 
 document.getElementById('open-settings').onclick = openSettings;
 document.getElementById('settings-close').onclick = () => {
@@ -861,6 +1093,8 @@ window.addEventListener('pagehide', () => {
 
 const C = {
   status: null,
+  leaving: null,    // the account just signed out of to use another, or null
+  returnTo: null,   // where to go back to once signed in again
   data: null,
   suggestion: null,
   plan: null,
@@ -899,6 +1133,10 @@ function renderWorkspace(ws) {
     bookEl.appendChild(el('span', 'bookbar-repo', ' · ' + ws.book.repo));
     if (ws.book.access === 'read' || ws.book.access === 'none') {
       bookEl.appendChild(el('span', 'bookbar-repo', ' · you can read this book but not change it'));
+      // The moment it matters is the moment to offer the way out.
+      const other = el('button', 'link inline', 'Use a different account');
+      other.onclick = () => switchAccount();
+      bookEl.appendChild(other);
     }
   } else {
     bookEl.textContent = 'No book chosen';
@@ -923,9 +1161,13 @@ function renderWorkspace(ws) {
   regEl.textContent = regText;
   regEl.classList.toggle('hidden', !regText);
 
-  const change = document.getElementById('bookbar-change');
-  change.classList.toggle('hidden', !!ws.locked);
+  // Changing book is always offered. With a vault open it closes the vault,
+  // since the vault decides the book, and goes straight to choosing another.
+  document.getElementById('bookbar-change').textContent =
+    v ? 'Change book (closes this vault)' : 'Change book';
   document.getElementById('bookbar-close').classList.toggle('hidden', !v);
+
+  renderAccount(ws.account);
 
   // What was on screen belonged to the old book; never leave it showing.
   if (before !== bookSlug()) {
@@ -935,6 +1177,31 @@ function renderWorkspace(ws) {
   ['console-book', 'sug-book', 'draft-book', 'publish-book'].forEach(id => {
     document.getElementById(id).textContent = ws.book ? ('For ' + ws.book.title) : '';
   });
+}
+
+/* Which GitHub account everything is done as. Shown in the bar at all times,
+   with the way to sign out or change it beside it. */
+function renderAccount(a) {
+  if (!a) return;
+  const acc = document.getElementById('bookbar-account');
+  acc.innerHTML = '';
+  if (a.signed_in && a.login) {
+    acc.appendChild(el('strong', '', a.login));
+    if (a.name && a.name !== a.login) acc.appendChild(el('span', 'bookbar-repo', ' · ' + a.name));
+  } else if (a.signed_in) {
+    acc.textContent = 'Signed in (checking which account…)';
+  } else {
+    acc.textContent = 'Not signed in';
+  }
+  document.getElementById('bookbar-signin').classList.toggle('hidden', !!a.signed_in);
+  document.getElementById('bookbar-switch-account').classList.toggle('hidden', !a.signed_in);
+  document.getElementById('bookbar-signout').classList.toggle('hidden', !a.signed_in);
+}
+
+// Asks who the sign-in belongs to, which needs the network, so the bar can
+// name the account rather than just say someone is signed in.
+async function refreshAccount() {
+  try { renderWorkspace(await api('/api/account', {})); } catch (e) { /* the bar keeps its last state */ }
 }
 
 async function refreshWorkspace() {
@@ -963,7 +1230,7 @@ async function openBookPicker() {
   if (WS.locked) {
     document.getElementById('books-locked-text').textContent = WS.book
       ? ('The vault you have open, “' + WS.vault.name + '”, is ' + WS.book.title +
-         ', so that is the book you are working on. To work on a different book, close the vault first.')
+         ', so that is the book you are working on. To work on a different book, close the vault first — the button below does that and lets you choose.')
       : (WS.vault.message + ' Close the vault to choose a book instead.');
   }
 
@@ -994,6 +1261,8 @@ async function openBookPicker() {
     list.appendChild(el('li', 'none',
       'Your account can’t make changes to any registered book. The book’s maintainer can give you access.'));
   }
+  document.getElementById('books-other-account').classList.toggle(
+    'hidden', !(r.hidden || !r.books.length));
   if (r.hidden) {
     hidden.textContent = r.hidden === 1
       ? '1 other book isn’t shown, because your account can’t make changes to it.'
@@ -1008,7 +1277,7 @@ async function chooseBook(slug) {
   await loadConsole();
 }
 
-document.getElementById('bookbar-change').onclick = enterBookPicker;
+document.getElementById('bookbar-change').onclick = switchBook;
 document.getElementById('books-back').onclick = () => document.getElementById('go-chapters').click();
 
 async function closeVault() {
@@ -1016,10 +1285,19 @@ async function closeVault() {
   if (onConsoleScreen()) await enterConsole();
 }
 document.getElementById('bookbar-close').onclick = closeVault;
-document.getElementById('books-close-vault').onclick = async () => {
-  try { renderWorkspace(await api('/api/vault/close', {})); } catch (e) { return fail(e.message); }
-  await openBookPicker();
-};
+
+// Work on a different book. The open vault decides the book, so it is closed
+// first, and the author goes straight to choosing another.
+async function switchBook() {
+  if (WS.vault) {
+    try { renderWorkspace(await api('/api/books/switch', {})); } catch (e) { return fail(e.message); }
+    // An import on its way into the old vault was dropped with it.
+    W.folder = null; W.converted = null; W.saved = null; W.sent = null; W.drafts = null;
+  }
+  await enterBookPicker();
+}
+document.getElementById('books-close-vault').onclick = switchBook;
+document.getElementById('books-switch-account').onclick = () => switchAccount('books');
 
 // Choosing a book needs to know who is asking, so it goes through sign-in.
 async function enterBookPicker() {
@@ -1056,6 +1334,7 @@ async function enterConsole(opts) {
   if (!C.status.configured) return show('step-console-setup');
   if (!C.status.signed_in) {
     document.getElementById('signin-code-box').classList.add('hidden');
+    renderSwitching();
     return show('step-console-signin');
   }
   // No book yet, or the author asked to change it: choose one first. The
@@ -1071,7 +1350,15 @@ document.getElementById('go-chapters').onclick = () => {
   show(S.sessionId ? 'step-choose' : 'step-choose');
 };
 document.getElementById('setup-back').onclick = () => document.getElementById('go-chapters').click();
-document.getElementById('signin-back').onclick = () => document.getElementById('go-chapters').click();
+document.getElementById('signin-back').onclick = () => {
+  stopPolling();
+  document.getElementById('signin-start').disabled = false;
+  const back = C.returnTo;
+  C.returnTo = null; C.leaving = null;
+  if (back === 'import') { place('chapters'); renderImportStep(); return show('step-import'); }
+  if (back === 'import-preview' && W.converted) { place('chapters'); return show('step-import-preview'); }
+  document.getElementById('go-chapters').click();
+};
 document.getElementById('setup-open-settings').onclick = openSettings;
 
 /* --- signing in --- */
@@ -1104,7 +1391,17 @@ function pollSignin(wait) {
       if (r.waiting) return pollSignin(r.wait || 5);
       document.getElementById('signin-start').disabled = false;
       C.status = null;
-      await enterConsole();
+      const leaving = C.leaving;
+      C.leaving = null;
+      renderSwitching();
+      await refreshAccount();
+      if (r.same_account) {
+        fail('GitHub signed you in as ' + r.login + ' again, the account you ' +
+          'signed out of. It uses whichever account your web browser is signed ' +
+          'in to. To use another one, sign out of GitHub in your browser, then ' +
+          'press “Use a different account” again.');
+      }
+      await afterSignin(leaving);
     } catch (e) {
       document.getElementById('signin-start').disabled = false;
       document.getElementById('signin-code-box').classList.add('hidden');
@@ -1113,13 +1410,74 @@ function pollSignin(wait) {
   }, Math.max(2, wait) * 1000);
 }
 
-document.getElementById('console-signout').onclick = async () => {
-  try { await api('/api/console/signout', {}); } catch (e) { /* signing out always succeeds locally */ }
+/* Signing out takes the sign-in out of the Keychain; the server reads it back
+   to make sure. If it could not, the author is told they are still signed in,
+   never shown a signed-out screen over a token that is still there. */
+async function signOut(switching) {
+  let r;
+  try {
+    r = await api('/api/console/signout', { switching: !!switching });
+  } catch (e) {
+    await refreshWorkspace();
+    fail(e.message);
+    return false;
+  }
   C.status = null; C.data = null;
   setWaitingCount(0);
-  await refreshWorkspace();
+  renderWorkspace(r.workspace);
+  C.leaving = switching ? (r.was || '') : null;
+  return true;
+}
+
+// `from` says where to come back to once signed in as the other account.
+async function switchAccount(from) {
+  document.getElementById('settings').classList.add('hidden');
+  if (!(await signOut(true))) return;
+  C.returnTo = from || null;
   await enterConsole();
+}
+
+function renderSwitching() {
+  const box = document.getElementById('signin-switching');
+  box.classList.toggle('hidden', C.leaving === null || C.leaving === undefined);
+  document.getElementById('signin-switching-text').textContent = C.leaving
+    ? ('You have signed out of ' + C.leaving + '. Its sign-in has been taken out of this Mac\'s Keychain.')
+    : 'The old sign-in has been taken out of this Mac\'s Keychain.';
+}
+
+async function afterSignin(leaving) {
+  const back = C.returnTo;
+  C.returnTo = null;
+  if (back === 'import') {
+    place('chapters');
+    renderImportStep();
+    return show('step-import');
+  }
+  if (back === 'import-preview' && W.converted) {
+    place('chapters');
+    try {
+      const d = await api('/api/import/drafts-status', {});
+      W.converted.drafts = d;
+    } catch (e) { /* said on the screen below */ }
+    renderDraftsIntro(W.converted.drafts);
+    document.getElementById('import-confirm').checked = false;
+    updateImportButtons();
+    return show('step-import-preview');
+  }
+  if (back === 'books') return enterBookPicker();
+  await enterConsole();
+}
+
+document.getElementById('console-signout').onclick = async () => {
+  if (await signOut(false)) await enterConsole();
 };
+document.getElementById('bookbar-signout').onclick = async () => {
+  if (await signOut(false) && onConsoleScreen()) await enterConsole();
+};
+document.getElementById('bookbar-switch-account').onclick = () => switchAccount();
+document.getElementById('bookbar-signin').onclick = () => enterConsole();
+document.getElementById('signin-github-signout').onclick = () =>
+  window.open('https://github.com/logout', '_blank', 'noopener');
 
 /* --- the list --- */
 
@@ -1582,6 +1940,7 @@ document.getElementById('welcome-settings').onclick = async () => {
   startHeartbeat();
   await loadEnv();
   await refreshWorkspace();
+  refreshAccount();
   refreshDeepseekOption();
   show(ENV.seen_welcome ? 'step-choose' : 'step-welcome');
 })();

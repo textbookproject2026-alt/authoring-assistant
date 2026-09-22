@@ -16,7 +16,8 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import config, console, convert, github, keychain, llm, picker, registry
+from . import (config, console, convert, drafts, github, keychain, llm,
+               picker, registry)
 from .session import Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -348,6 +349,8 @@ def r_savekey(handler, data):
 # way to becoming one. Everything is converted into a temporary folder first;
 # the vault is not touched until r_import_save.
 
+CHAPTERS_FOLDER = "chapters"   # where a book keeps its chapters
+
 IMPORT = {
     "docx": None,        # the Word document chosen
     "folder": None,      # where in the vault it is going
@@ -362,14 +365,38 @@ def _forget_import():
     IMPORT["result"] = None
 
 
+def _chapters_folder():
+    """The open vault's chapters folder, where a new chapter belongs. None
+    when no vault is open or it has no such folder."""
+    ident = WORKSPACE["vault"]
+    if ident is None:
+        return None
+    folder = os.path.join(ident["root"], CHAPTERS_FOLDER)
+    if not os.path.isdir(folder) or convert.find_vault_root(folder) != ident["root"]:
+        return None
+    return folder
+
+
+def _chapters_in(folder):
+    return sum(1 for n in os.listdir(folder)
+               if n.lower().endswith((".md", ".markdown")))
+
+
 def r_import_status(handler, data):
-    """Whether this Mac can read Word documents at all."""
+    """Whether this Mac can read Word documents at all, and where the chapter
+    will go: the open vault's chapters folder, until the author picks another.
+    """
+    if IMPORT["folder"] is None:
+        IMPORT["folder"] = _chapters_folder()
     st = convert.status()
     st["docx"] = IMPORT["docx"]
     st["docx_name"] = os.path.basename(IMPORT["docx"]) if IMPORT["docx"] else None
     st["folder"] = IMPORT["folder"]
     st["folder_name"] = (os.path.basename(IMPORT["folder"])
                          if IMPORT["folder"] else None)
+    st["chapters_here"] = (_chapters_in(IMPORT["folder"])
+                           if IMPORT["folder"] and os.path.isdir(IMPORT["folder"])
+                           else 0)
     return st
 
 
@@ -412,8 +439,8 @@ def r_import_pick_docx(handler, data):
 
 def r_import_pick_folder(handler, data):
     ident = WORKSPACE["vault"]
-    start = IMPORT["folder"] or (ident["root"] if ident else None) \
-        or os.path.expanduser("~")
+    start = IMPORT["folder"] or _chapters_folder() \
+        or (ident["root"] if ident else None) or os.path.expanduser("~")
     path, err = picker.choose_folder(
         "Choose where in your vault the converted chapter should go", start
     )
@@ -432,8 +459,10 @@ def r_import_pick_folder(handler, data):
     IMPORT["folder"] = folder
     return {"folder": folder,
             "folder_name": os.path.basename(folder) or folder,
-            "chapters_here": sum(1 for n in os.listdir(folder)
-                                 if n.lower().endswith((".md", ".markdown")))}
+            "chapters_here": _chapters_in(folder),
+            # The top of the vault is a folder an author can pick by mistake:
+            # it opens there, and chapters don't belong there.
+            "at_top": os.path.abspath(folder) == os.path.abspath(top)}
 
 
 def r_import_convert(handler, data):
@@ -449,15 +478,28 @@ def r_import_convert(handler, data):
     if not name.lower().endswith((".md", ".markdown")):
         name += ".md"
 
-    problem = convert.destination_problem(IMPORT["folder"], name)
+    problem = convert.name_problem(name)
     if problem:
         raise KeyError(problem)
+    # What stops it being saved into the folder (a chapter of that name is
+    # already there, say) doesn't stop it going to the drafts area, where it
+    # replaces the chapter in a commit that can be looked back at. Only when
+    # neither can happen is the author stopped before the conversion, so they
+    # are never told at the end of a long import that it cannot land.
+    local = convert.destination_problem(IMPORT["folder"], name)
+    to_drafts, drafts_reason, drafts_why = _drafts_availability()
+    if local and not to_drafts:
+        raise KeyError(local)
 
     _forget_import()
     try:
         result = convert.convert(IMPORT["docx"], name, IMPORT["folder"])
     except convert.ConversionFailed as e:
         raise KeyError(str(e))
+    ident = WORKSPACE["vault"]
+    result["book"] = WORKSPACE["book"]
+    result["vault"] = ident["root"] if ident else None
+    result["local_problem"] = local
     IMPORT["result"] = result
 
     found = convert.report(result)
@@ -470,6 +512,9 @@ def r_import_convert(handler, data):
         "notes": found["notes"],
         "counts": found["counts"],
         "folder": IMPORT["folder"],
+        "local_problem": local,
+        "drafts": {"available": to_drafts, "why": drafts_reason,
+                   "message": drafts_why},
     }
 
 
@@ -485,7 +530,9 @@ def r_import_save(handler, data):
         result.get("media_target"),
     )
     chapter_path, media_path = convert.save(result, IMPORT["folder"])
-    _forget_import()
+    # Kept, not cleared away: the same chapter can still be sent to the
+    # drafts area. It goes when another import starts, or on cancel or quit.
+    result["saved"] = chapter_path
     IMPORT["last_saved"] = chapter_path
     return {
         "chapter": chapter_path,
@@ -501,7 +548,188 @@ def r_import_cancel(handler, data):
     return {"ok": True}
 
 
+# --- sending a Word import to the drafts area -------------------------------
+#
+# The same converted chapter can be saved into the folder, sent to the book's
+# drafts area, or both. Sending is one commit on the drafts branch, made as the
+# signed-in author, on top of the drafts branch exactly as the author was shown
+# it (drafts.py). Only the book the open vault is, checked again at the moment
+# of sending, is ever written to.
+
+def _drafts_availability():
+    """Whether this import can go to a drafts area. (True/False, why, words).
+
+    `why` is "ok", "unchecked", "no_vault", "not_book", "signed_out" or
+    "no_access"; the last two can be put right by signing in as someone else.
+    """
+    ident = WORKSPACE["vault"]
+    if ident is None:
+        return False, "no_vault", (
+            "Once you choose where in your vault the chapter goes, this says "
+            "whether it can also be sent to the book's drafts area.")
+    book = _current_book()
+    if (ident["state"] != registry.OK or book is None
+            or ident["book"].slug != book.slug):
+        return False, "not_book", (
+            (ident["message"] + " ") if ident["message"] else "") + (
+            "So this chapter can't be sent to a book's drafts area. It can "
+            "still be saved into the folder.")
+    token = _token()
+    if not token:
+        return False, "signed_out", (
+            f"You aren't signed in, so this chapter can't be sent to the drafts "
+            f"area of “{book.title}”. Sign in under “Waiting for you” first if "
+            "you want to. It can still be saved into your vault.")
+    level = _known_access(book.slug)
+    if level is None:
+        try:
+            if _ensure_login(token) is None:
+                _check_access(token, [book])
+        except KeyError as e:
+            return False, "signed_out", (
+                str(e.args[0]) + " It can still be saved into your vault.")
+        level = _known_access(book.slug)
+    who = f" ({CONSOLE['login']})" if CONSOLE["login"] else ""
+    if level in ("read", "none"):
+        return False, "no_access", (
+            f"Your account{who} can't make changes to “{book.title}” "
+            f"({book.repo}), so this chapter can't be sent to its drafts area. "
+            "It can still be saved into your vault. The book's maintainer can "
+            "give you access, or you can sign in with a different account.")
+    where = (f"the drafts area of “{book.title}” ({book.repo}, "
+             f"“{book.drafts_branch}”)")
+    if level is None:
+        return True, "unchecked", (
+            f"It could not be checked just now whether your account can change "
+            f"“{book.title}”. You can try sending it to {where}; if your account "
+            "can't, you will be told and nothing will change.")
+    return True, "ok", (f"Once it is converted you can send it to {where}, "
+                        f"as yourself{who}. Readers don't see the drafts area.")
+
+
+def r_import_drafts_status(handler, data):
+    """Said on the import screen, before anything is converted."""
+    ok, why, message = _drafts_availability()
+    return {"available": ok, "why": why, "message": message,
+            "workspace": _workspace_info()}
+
+
+def _guard_drafts_send(book, result):
+    """Refuse unless the open vault, read again now, is `book`'s, and is the
+    vault this chapter was converted in. Raises KeyError, having sent nothing.
+    """
+    ident = WORKSPACE["vault"]
+    if ident is None:
+        raise KeyError("No vault is open, so nothing was sent. Please start "
+                       "again.")
+    fresh = registry.identify(ident["root"])
+    if fresh["key"] != ident["key"]:
+        raise KeyError(
+            f"The settings in “{ident['name']}” changed after it was opened, so "
+            "it can't be trusted to be the same book. Nothing was sent. Open "
+            "the vault again.")
+    if fresh["state"] != registry.OK:
+        raise KeyError(fresh["message"] + " Nothing was sent.")
+    if (fresh["book"].slug != book.slug or result.get("book") != book.slug
+            or result.get("vault") != ident["root"]
+            or not registry.within(ident["root"], IMPORT["folder"] or "")):
+        raise KeyError(
+            f"This chapter was converted for a different book or vault from "
+            f"“{book.title}”, the one open now. Nothing was sent. Please "
+            "convert it again.")
+
+
+def _drafts_plan(token, book, result):
+    """Read the drafts area and work out the commit. Stored on the result."""
+    paths = drafts.repo_paths(result["vault"], IMPORT["folder"],
+                              result["md_name"])
+    if paths is None:
+        raise KeyError("Where this chapter is going isn't inside the book's "
+                       "folder, so it can't be sent. Nothing was sent.")
+    chapter_path, media_dir = paths
+    state = _unwrap(drafts.read(token, book, chapter_path, media_dir))
+    entries = []
+    if not state["refused"]:
+        entries = drafts.build_tree(chapter_path,
+                                    result["text"].encode("utf-8"), media_dir,
+                                    drafts.pictures(result),
+                                    state["on_drafts"])
+    result["drafts"] = {"book": book.slug, "state": state, "entries": entries,
+                        "chapter_path": chapter_path}
+    shown = drafts.describe(book, state, entries, chapter_path, media_dir,
+                            result["text"])
+    shown["head"] = state["head"]
+    return shown
+
+
+def r_import_drafts_check(handler, data):
+    """What sending would do. Reads the drafts area; changes nothing."""
+    token = _token()
+    if not token:
+        _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
+    result = IMPORT.get("result")
+    if not result:
+        raise KeyError("There is nothing converted to send. Please start again.")
+    _guard_drafts_send(book, result)
+    return _drafts_plan(token, book, result)
+
+
+def r_import_drafts_send(handler, data):
+    """One commit on the drafts branch, or a refusal that changed nothing."""
+    token = _token()
+    if not token:
+        _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
+    result = IMPORT.get("result")
+    if not result:
+        raise KeyError("There is nothing converted to send. Please start again.")
+    _guard_drafts_send(book, result)
+    plan = result.get("drafts")
+    if not plan or plan["book"] != book.slug:
+        raise KeyError("Please look at what will be sent again before sending.")
+    state = plan["state"]
+    if data.get("head") != state["head"]:
+        raise KeyError("This screen is out of date, so nothing was sent. "
+                       "Please look at what will be sent again.")
+    if state["refused"]:
+        raise KeyError(state["refused"])
+    if state["exists"] and not data.get("replace"):
+        raise KeyError(
+            "A chapter of this name is already in the drafts area. Tick the "
+            "box to say it should be replaced, or go back and give this one "
+            "a different name. Nothing was sent.")
+
+    name = os.path.basename(result["md_name"])
+    message = (f"Bring in {name} from Word\n\n"
+               f"Converted from “{os.path.basename(result['docx'])}” by the "
+               "Authoring Assistant.")
+    sent = drafts.send(token, book, state, plan["entries"], message)
+    if isinstance(sent, dict) and sent.get("moved"):
+        result["drafts"] = None
+        shown = _drafts_plan(token, book, result)
+        return {"moved": True, "message": drafts.MOVED, "drafts": shown}
+    sent = _unwrap(sent)
+    result["sent"] = sent["sha"]
+    result["drafts"] = None
+    removed = [e["path"] for e in plan["entries"] if e["data"] is None]
+    return {
+        "sent": True,
+        "sha": sent["sha"],
+        "url": sent.get("url"),
+        "repo": book.repo,
+        "branch": book.drafts_branch,
+        "chapter_path": plan["chapter_path"],
+        "files": len(plan["entries"]) - len(removed),
+        "removed": len(removed),
+        "saved": result.get("saved"),
+    }
+
+
 def r_quit(handler, data):
+    _forget_import()
     threading.Timer(0.4, SHUTDOWN.set).start()
     return {"stopping": True}
 
@@ -603,6 +831,15 @@ def _vault_info(ident):
                                   "message")}
 
 
+def _account_info():
+    """Which GitHub account this Mac is signed in as. `login` is None until it
+    has been asked for (see r_account)."""
+    signed_in = bool(_token())
+    return {"signed_in": signed_in,
+            "login": CONSOLE["login"] if signed_in else None,
+            "name": CONSOLE["who"] if signed_in else None}
+
+
 def _workspace_info():
     """Everything the page needs to say which book and vault are in use."""
     _restore_last_book()
@@ -621,6 +858,7 @@ def _workspace_info():
         info["access"] = _known_access(book.slug) or "unknown"
     return {
         "registry": reg_info,
+        "account": _account_info(),
         "book": info,
         "vault": _vault_info(ident),
         # With a vault open, the vault decides the book.
@@ -710,6 +948,18 @@ def r_vault_close(handler, data):
     WORKSPACE["vault"] = None
     CONSOLE["plans"].clear()
     return _workspace_info()
+
+
+def r_books_switch(handler, data):
+    """Work on a different book: close the vault, which decides the book, so
+    another can be chosen. A Word import on its way into that vault is
+    dropped, since it was going into the book being left."""
+    ident = WORKSPACE["vault"]
+    if ident is not None and IMPORT["folder"] and \
+            registry.within(ident["root"], IMPORT["folder"]):
+        _forget_import()
+        IMPORT["folder"] = None
+    return r_vault_close(handler, data)
 
 
 def _known_access(slug):
@@ -840,6 +1090,7 @@ CONSOLE = {
     "who": None,      # who is signed in, remembered so we don't ask every time
     "login": None,    # their account name, which the access record is kept under
     "signin": None,   # the sign-in attempt in progress
+    "leaving": None,  # the account signed out of to use a different one
     "access": {},     # book slug -> "write", "read" or "none", checked this run
     "loaded": None,   # the suggestions last shown: {"slug", "suggestions"}
     "plans": {},      # (book slug, suggestion number) -> the change worked out
@@ -915,6 +1166,7 @@ def r_console_status(handler, data):
         "client_hint": client[:8] if client else "",
         "signed_in": bool(_token()),
         "who": CONSOLE["who"],
+        "login": CONSOLE["login"],
         "keychain": keychain.available(),
         "workspace": _workspace_info(),
     }
@@ -976,11 +1228,24 @@ def r_console_signin_poll(handler, data):
         CONSOLE["login"] = None
         raise KeyError(who.message)
     CONSOLE["who"], CONSOLE["login"] = who["name"], who["login"]
-    return {"signed_in": True, "who": who["name"]}
+    leaving, CONSOLE["leaving"] = CONSOLE.get("leaving"), None
+    # GitHub signs in whoever its web page is signed in as, so asking for a
+    # different account can quietly give back the same one.
+    same = bool(leaving) and leaving.casefold() == who["login"].casefold()
+    return {"signed_in": True, "who": who["name"], "login": who["login"],
+            "same_account": same}
 
 
 def r_console_signout(handler, data):
-    keychain.delete(keychain.ACCOUNT_GITHUB)
+    """Forget this Mac's sign-in, for real, not just on screen.
+
+    The token is taken out of the Keychain and then read back: the author is
+    only told they are signed out once it can't be. `switching` says they want
+    a different account, so the next sign-in can tell them if GitHub hands back
+    the same one.
+    """
+    leaving = CONSOLE["login"]
+    gone = keychain.forget(keychain.ACCOUNT_GITHUB)
     CONSOLE["who"] = None
     CONSOLE["login"] = None
     CONSOLE["signin"] = None
@@ -988,7 +1253,33 @@ def r_console_signout(handler, data):
     _forget_book_work()
     # What one account could change says nothing about the next one.
     config.write_state(book_access=None)
-    return {"signed_in": False}
+    if IMPORT.get("result"):
+        IMPORT["result"]["drafts"] = None
+    if not gone:
+        CONSOLE["leaving"] = None
+        raise KeyError(
+            "The sign-in could not be taken out of this Mac's Keychain, so you "
+            "are still signed in. Try again, and allow the Keychain prompt if "
+            "one appears.")
+    CONSOLE["leaving"] = leaving if data.get("switching") else None
+    return {"signed_in": False, "was": leaving, "workspace": _workspace_info()}
+
+
+def r_account(handler, data):
+    """Who is signed in, found out if it isn't known yet. For the book band."""
+    token = _token()
+    problem = None
+    if token:
+        try:
+            found = _ensure_login(token)
+        except KeyError as e:        # the sign-in is no longer accepted
+            found = None
+            problem = str(e.args[0])
+        if found is not None:
+            problem = found.message
+    info = _workspace_info()
+    info["account_problem"] = problem
+    return info
 
 
 def r_console_pick_vault(handler, data):
@@ -1461,11 +1752,16 @@ ROUTES = {
     "/api/import/convert": r_import_convert,
     "/api/import/save": r_import_save,
     "/api/import/cancel": r_import_cancel,
+    "/api/import/drafts-status": r_import_drafts_status,
+    "/api/import/drafts-check": r_import_drafts_check,
+    "/api/import/drafts-send": r_import_drafts_send,
 
     "/api/workspace": r_workspace,
     "/api/vault/close": r_vault_close,
     "/api/books": r_books,
     "/api/books/choose": r_books_choose,
+    "/api/books/switch": r_books_switch,
+    "/api/account": r_account,
 
     "/api/console/status": r_console_status,
     "/api/console/save-client": r_console_save_client,

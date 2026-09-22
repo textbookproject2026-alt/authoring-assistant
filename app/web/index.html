@@ -31,12 +31,17 @@
         <span id="bookbar-book">No book chosen</span></p>
       <p class="bookbar-line"><span class="bookbar-label">Vault</span>
         <span id="bookbar-vault">None open</span></p>
+      <p class="bookbar-line"><span class="bookbar-label">Account</span>
+        <span id="bookbar-account">Not signed in</span></p>
       <p class="bookbar-note hidden" id="bookbar-problem"></p>
       <p class="bookbar-note quiet hidden" id="bookbar-registry"></p>
     </div>
     <div class="bookbar-actions">
       <button class="link" id="bookbar-change">Change book</button>
       <button class="link hidden" id="bookbar-close">Close vault</button>
+      <button class="link hidden" id="bookbar-signin">Sign in</button>
+      <button class="link hidden" id="bookbar-switch-account">Use a different account</button>
+      <button class="link hidden" id="bookbar-signout">Sign out</button>
     </div>
   </div>
 </div>
@@ -301,12 +306,21 @@
     </li>
   </ol>
 
+  <div class="card">
+    <p class="card-label">The book's drafts area</p>
+    <p id="import-drafts-status">Once you choose where in your vault the chapter
+    goes, this says whether it can also be sent to the book's drafts area.</p>
+    <div class="actions tight hidden" id="import-account-actions">
+      <button id="import-switch-account">Use a different account</button>
+    </div>
+  </div>
+
   <div class="actions">
     <button class="primary" id="do-convert" disabled>Convert and show me</button>
     <button class="link" data-back="step-choose">Go back</button>
   </div>
-  <p class="quiet">Nothing is written into your vault until you have seen the
-  result and said yes.</p>
+  <p class="quiet">Nothing is written into your vault, or sent anywhere, until
+  you have seen the result and said yes.</p>
 </section>
 
 <!-- W2. what came out -->
@@ -329,29 +343,48 @@
     <ul class="summary-list" id="import-media-list"></ul>
   </div>
 
+  <div id="import-drafts-block" class="card hidden">
+    <p class="card-label">Send to drafts</p>
+    <p id="import-drafts-where"></p>
+    <p id="import-drafts-detail"></p>
+    <ul class="summary-list" id="import-drafts-removed"></ul>
+    <p class="note bad" id="import-drafts-problem"></p>
+    <div class="actions tight hidden" id="import-preview-account-actions">
+      <button id="import-preview-switch-account">Use a different account</button>
+    </div>
+    <label class="check hidden" id="import-replace-label"><input type="checkbox" id="import-replace">
+      <span>Replace the chapter in the drafts area with this one.</span></label>
+  </div>
+
   <div class="warnbox">
     <h3>Please read this before you continue</h3>
-    <p>When you press the button below, a new chapter is written into your vault,
-    along with a folder of pictures if there were any.</p>
-    <p><strong>Nothing existing is overwritten.</strong> If a chapter of this name
+    <p><strong>Save this chapter</strong> writes a new chapter into your vault,
+    along with a folder of pictures if there were any.
+    <strong>Nothing existing is overwritten.</strong> If a chapter of this name
     already appeared while you were reading, the tool stops and tells you rather
     than replacing it.</p>
+    <p><strong>Send to drafts</strong> puts the chapter and its pictures in the
+    book's drafts area as one change, made by you. Readers don't see it until it
+    goes live. If anyone else changed the drafts area while you were reading,
+    nothing is sent and you are shown what is there now.</p>
     <label class="check confirm"><input type="checkbox" id="import-confirm">
       <span>I have looked at the chapter above and I want to save it.</span></label>
   </div>
 
+  <p class="note" id="import-local-note"></p>
   <div class="actions">
     <button class="primary" id="do-import-save" disabled>Save this chapter</button>
+    <button class="primary" id="do-send-drafts" disabled>Send to drafts</button>
     <button class="link" id="import-preview-back">Go back and change something</button>
   </div>
 </section>
 
 <!-- W3. saved, and what to do next -->
 <section id="step-import-done" class="step hidden">
-  <h2>The chapter is in your vault</h2>
+  <h2 id="import-done-title">The chapter is in your vault</h2>
   <div id="import-done-summary"></div>
 
-  <div class="card">
+  <div class="card" id="import-analyse-card">
     <p class="card-label">Worth doing now</p>
     <p>A chapter that has just come out of Word has no links in it at all. The
     tool can go through it now and offer to link its citations, its concept-page
@@ -363,6 +396,7 @@
 
   <div class="actions">
     <button class="primary" id="import-analyse">Go through this chapter now</button>
+    <button class="link hidden" id="import-other-way"></button>
     <button class="link" id="import-another">Bring in another Word document</button>
     <button class="link" id="import-finish">Not now</button>
   </div>
@@ -403,6 +437,17 @@
   <p class="quiet">You only do this once. Your sign-in is kept in this Mac's
   Keychain, never in a file.</p>
 
+  <div id="signin-switching" class="card hidden">
+    <p class="card-label">Signing in as someone else</p>
+    <p id="signin-switching-text"></p>
+    <p>GitHub signs in whichever account your web browser is signed in to. If
+    that is still the old one, sign out of it on GitHub first, then come back
+    and press <strong>Sign in</strong>.</p>
+    <div class="actions tight">
+      <button id="signin-github-signout">Sign out of GitHub in my browser</button>
+    </div>
+  </div>
+
   <div id="signin-code-box" class="card hidden">
     <p class="card-label">Step 1 — copy this code</p>
     <p class="bigcode" id="signin-code">····-····</p>
@@ -428,13 +473,15 @@
     <p class="card-label">Your vault decides</p>
     <p id="books-locked-text"></p>
     <div class="actions tight">
-      <button id="books-close-vault">Close the vault and choose a book</button>
+      <button id="books-close-vault">Close the vault and choose another book</button>
     </div>
   </div>
 
   <p class="notice hidden" id="books-note"></p>
   <ul class="queue" id="books-list"></ul>
   <p class="quiet" id="books-hidden"></p>
+  <p class="hidden" id="books-other-account"><button class="link"
+    id="books-switch-account">Not the right account? Use a different one</button></p>
 
   <div class="actions">
     <button class="link" id="books-back">Back to my chapters</button>
@@ -593,6 +640,15 @@
     <p class="quiet">The key is kept in <span id="key-file">this Mac's
     Keychain</span>, not in a file. It is never put in your vault, and the only
     thing ever sent to DeepSeek is the chapter you are working on.</p>
+
+    <h3>Your account</h3>
+    <p id="settings-account">Not signed in.</p>
+    <div class="actions tight hidden" id="settings-account-actions">
+      <button id="settings-switch-account">Use a different account</button>
+      <button class="link" id="settings-signout">Sign out</button>
+    </div>
+    <p class="quiet">Signing out takes your sign-in out of this Mac's Keychain.
+    Nothing in your vault or your book is changed.</p>
 
     <h3>Signing in to see what is waiting</h3>
     <p class="quiet">This is the one-off identifier the technical contact gives you. It is not a
