@@ -124,6 +124,27 @@ until you have read it and ticked the box.
 Your Word document is never changed and never moved. It stays exactly where it
 is, and you can go back to it at any time.
 
+### Sending it to the drafts area
+
+If you are signed in to the console and can make changes to the book, the
+converted chapter can also go straight to the book's **drafts area**, the same
+place the browser editor writes to. Press **Send to drafts** instead of, or as
+well as, **Save this chapter**. The chapter and its pictures arrive as one
+change, made by you, and readers don't see it until the drafts go live.
+
+The import screen tells you before you convert whether this is open to you. If
+your account can't change the book, it says so there, and you can still save the
+chapter into your vault.
+
+- **Bringing a chapter in again** replaces the one of that name in the drafts
+  area. You are shown who last changed it and how many lines differ, any
+  pictures the Word document no longer has are listed (they are taken out), and
+  you tick a second box to say yes.
+- **If anyone else changes the drafts area while you are reading** (the
+  browser editor, say), nothing is sent. The tool looks again, shows you what
+  is there now, and you press **Send to drafts** again. It never writes over
+  anyone else's work.
+
 ### What to expect
 
 Word can hold things that a chapter file cannot, so some parts come across better

@@ -466,7 +466,10 @@ document.getElementById('finish').onclick = async () => {
 const W = {
   docx: null,
   folder: null,
-  saved: null,      // { chapter, media } once written
+  converted: null,  // what the server said came out
+  saved: null,      // { chapter, media } once written into the vault
+  drafts: null,     // what sending to the drafts area would do, as last read
+  sent: null,       // { sha, url, ... } once sent to the drafts area
 };
 
 document.getElementById('pick-docx').onclick = enterImport;
@@ -524,6 +527,19 @@ function renderImportStep() {
   document.getElementById('folder-chosen').textContent =
     W.folder ? W.folder.folder : 'Nothing chosen yet.';
   checkImportReady();
+  refreshDraftsStatus();
+}
+
+/* Whether the chapter can go to the book's drafts area is said here, before
+   anything is converted, so an author whose account can't change the book is
+   told now and not after reading the whole chapter. */
+async function refreshDraftsStatus() {
+  const p = document.getElementById('import-drafts-status');
+  try {
+    const r = await api('/api/import/drafts-status', {});
+    p.textContent = r.message;
+    p.className = r.available ? '' : 'quiet';
+  } catch (e) { p.textContent = e.message; p.className = 'quiet bad'; }
 }
 
 function checkImportReady() {
@@ -558,6 +574,7 @@ document.getElementById('choose-import-folder').onclick = async () => {
     if (r.error) return fail(r.error);
     await refreshWorkspace();
     W.folder = r;
+    refreshDraftsStatus();
     document.getElementById('folder-chosen').textContent =
       r.folder + (r.chapters_here
         ? `  —  ${r.chapters_here} chapter${r.chapters_here === 1 ? '' : 's'} already here`
@@ -574,6 +591,7 @@ document.getElementById('do-convert').onclick = async () => {
     const r = await api('/api/import/convert', {
       name: document.getElementById('import-name').value.trim(),
     });
+    W.saved = null; W.sent = null; W.drafts = null;
     renderImportPreview(r);
     show('step-import-preview');
   } catch (e) { fail(e.message); show('step-import'); }
@@ -627,12 +645,127 @@ function renderImportPreview(r) {
     mBlock.classList.add('hidden');
   }
 
+  W.converted = r;
+  document.getElementById('import-local-note').textContent = r.local_problem
+    ? 'It can\'t be saved into your vault: ' + r.local_problem : '';
+  renderDraftsIntro(r.drafts);
+
   document.getElementById('import-confirm').checked = false;
   document.getElementById('do-import-save').disabled = true;
+  updateImportButtons();
+}
+
+function renderDraftsIntro(d) {
+  const block = document.getElementById('import-drafts-block');
+  block.classList.remove('hidden');
+  document.getElementById('import-drafts-where').textContent = d ? d.message : '';
+  document.getElementById('import-drafts-detail').textContent = '';
+  document.getElementById('import-drafts-removed').innerHTML = '';
+  document.getElementById('import-drafts-problem').textContent = '';
+  document.getElementById('import-replace-label').classList.add('hidden');
+  document.getElementById('import-replace').checked = false;
+  if (d && d.available) checkDrafts();
+}
+
+async function checkDrafts() {
+  document.getElementById('import-drafts-detail').textContent =
+    'Looking at the drafts area…';
+  try {
+    W.drafts = await api('/api/import/drafts-check', { book: bookSlug() });
+    renderDrafts(W.drafts);
+  } catch (e) {
+    W.drafts = null;
+    document.getElementById('import-drafts-detail').textContent = '';
+    document.getElementById('import-drafts-problem').textContent = e.message;
+  }
+  updateImportButtons();
+}
+
+function renderDrafts(d) {
+  const pics = W.converted && W.converted.media.length
+    ? ` Its pictures go in “${d.media_dir}”.` : '';
+  document.getElementById('import-drafts-where').textContent =
+    `It will go to the drafts area of ${d.repo} (“${d.branch}”) as “${d.chapter_path}”, ` +
+    `as one change made by you.` + pics;
+  let detail = '';
+  if (d.exists) {
+    const last = d.last
+      ? ` It was last changed by ${d.last.who || 'someone'}` +
+        (d.last.when ? ` on ${new Date(d.last.when).toLocaleString()}` : '') +
+        (d.last.message ? ` (“${d.last.message}”)` : '') + '.'
+      : '';
+    const lines = d.changed_lines
+      ? ` Sending replaces it with this one: ${d.changed_lines.removed} line` +
+        `${d.changed_lines.removed === 1 ? '' : 's'} taken out, ${d.changed_lines.added} put in.`
+      : ' Sending replaces it with this one.';
+    detail = 'A chapter of this name is already in the drafts area.' + last + lines +
+      ' Anything in it that isn\'t in your Word document — an edit made in the ' +
+      'browser editor, say — is replaced too. It stays in the drafts area\'s history.';
+  }
+  if (d.nothing_to_send) detail = 'The drafts area already has exactly this chapter ' +
+    'and these pictures, so there is nothing to send.';
+  document.getElementById('import-drafts-detail').textContent = detail;
+
+  const removed = document.getElementById('import-drafts-removed');
+  removed.innerHTML = '';
+  if (d.removed.length) {
+    removed.appendChild(el('li', '', 'These pictures are in the drafts area from an ' +
+      'earlier import and aren\'t in this one, so they will be taken out: ' +
+      d.removed.join(', ') + '.'));
+  }
+  document.getElementById('import-drafts-problem').textContent = d.refused || '';
+  document.getElementById('import-replace-label').classList.toggle(
+    'hidden', !(d.exists && !d.refused && !d.nothing_to_send));
+  document.getElementById('import-replace').checked = false;
+}
+
+function updateImportButtons(confirmed) {
+  const ok = confirmed === undefined
+    ? document.getElementById('import-confirm').checked : confirmed;
+  const r = W.converted || {};
+  document.getElementById('do-import-save').disabled =
+    !ok || !!r.local_problem || !!W.saved;
+  const d = W.drafts;
+  document.getElementById('do-send-drafts').disabled = !ok || !!W.sent || !d ||
+    !!d.refused || d.nothing_to_send ||
+    (d.exists && !document.getElementById('import-replace').checked);
 }
 
 document.getElementById('import-confirm').onchange = e => {
   document.getElementById('do-import-save').disabled = !e.target.checked;
+  updateImportButtons(e.target.checked);
+};
+document.getElementById('import-replace').onchange = () => updateImportButtons();
+
+document.getElementById('do-send-drafts').onclick = async () => {
+  document.getElementById('do-send-drafts').disabled = true;
+  show('step-working');
+  document.getElementById('working-note').textContent = 'Sending to the drafts area…';
+  try {
+    const r = await api('/api/import/drafts-send', {
+      book: bookSlug(), head: W.drafts.head,
+      replace: document.getElementById('import-replace').checked,
+    });
+    if (r.moved) {
+      /* Nothing was sent. What is there now is shown, and the author has to
+         look and say yes again. */
+      W.drafts = r.drafts;
+      renderDrafts(r.drafts);
+      document.getElementById('import-drafts-problem').textContent =
+        r.message + (r.drafts.refused ? ' ' + r.drafts.refused : '');
+      document.getElementById('import-confirm').checked = false;
+      updateImportButtons();
+      return show('step-import-preview');
+    }
+    W.sent = r;
+    renderImportDone();
+    show('step-import-done');
+  } catch (e) {
+    fail(e.message);
+    show('step-import-preview');
+    document.getElementById('import-confirm').checked = false;
+    updateImportButtons();
+  }
 };
 
 document.getElementById('import-preview-back').onclick = async () => {
@@ -647,31 +780,73 @@ document.getElementById('do-import-save').onclick = async () => {
   try {
     const r = await api('/api/import/save', {});
     W.saved = r;
-    renderImportDone(r);
+    renderImportDone();
     show('step-import-done');
   } catch (e) {
     fail(e.message);
     show('step-import-preview');
     document.getElementById('import-confirm').checked = false;
+    updateImportButtons();
   }
 };
 
-function renderImportDone(r) {
+function renderImportDone() {
+  const r = W.saved, s = W.sent;
+  document.getElementById('import-done-title').textContent =
+    r && s ? 'The chapter is in your vault and in the drafts area'
+      : s ? 'The chapter is in the drafts area' : 'The chapter is in your vault';
   const box = document.getElementById('import-done-summary');
   box.innerHTML = '';
   const list = el('ul', 'summary-list');
-  list.appendChild(el('li', '', `Your new chapter is ${r.chapter}`));
-  if (r.media) list.appendChild(el('li', '',
-    `Its pictures are in ${r.media_name || r.media}, inside your textbook`));
+  if (r) {
+    list.appendChild(el('li', '', `Your new chapter is ${r.chapter}`));
+    if (r.media) list.appendChild(el('li', '',
+      `Its pictures are in ${r.media_name || r.media}, inside your textbook`));
+  }
+  if (s) {
+    list.appendChild(el('li', '',
+      `It is in the drafts area of ${s.repo} (“${s.branch}”) as ${s.chapter_path}, ` +
+      `in one change made by you` +
+      (s.removed ? `, which also took out ${s.removed} picture${s.removed === 1 ? '' : 's'} ` +
+        'the Word document no longer has' : '') + '.'));
+    list.appendChild(el('li', '', 'Readers don\'t see it until the drafts go live.'));
+  }
   list.appendChild(el('li', '',
     'Your Word document has not been changed or moved. It is still where it was.'));
   box.appendChild(list);
-  box.appendChild(el('p', '',
+  if (s && s.url) {
+    const a = el('a', '', 'See the change');
+    a.href = s.url; a.target = '_blank'; a.rel = 'noopener';
+    box.appendChild(a);
+  }
+  if (r) box.appendChild(el('p', '',
     'If Obsidian is open, the new chapter appears in it on its own.'));
+
+  document.getElementById('import-analyse').classList.toggle('hidden', !r);
+  document.getElementById('import-analyse-card').classList.toggle('hidden', !r);
+  const other = document.getElementById('import-other-way');
+  const c = W.converted || {};
+  const canSend = c.drafts && c.drafts.available && !s;
+  const canSave = !c.local_problem && !r;
+  other.textContent = canSend ? 'Send it to drafts as well'
+    : canSave ? 'Save it into your vault as well' : '';
+  other.classList.toggle('hidden', !(canSend || canSave));
 }
 
+/* Back to the same converted chapter, to do the other of the two. It has to be
+   looked at and ticked again, and the drafts area is read again. */
+document.getElementById('import-other-way').onclick = () => {
+  document.getElementById('import-confirm').checked = false;
+  if (W.converted && W.converted.drafts && W.converted.drafts.available && !W.sent) {
+    checkDrafts();
+  }
+  updateImportButtons();
+  show('step-import-preview');
+};
+
 document.getElementById('import-another').onclick = () => {
-  W.docx = null;                  // the folder is kept: it is usually the same one
+  W.docx = null;
+  W.saved = null; W.sent = null; W.drafts = null; W.converted = null;                  // the folder is kept: it is usually the same one
   document.getElementById('import-name').value = '';
   renderImportStep();
   show('step-import');

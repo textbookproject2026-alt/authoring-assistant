@@ -110,6 +110,22 @@ const bodies = {};
 
 let lastPreviewBody = null;
 let lastConvertBody = null;
+// What the fake server says about sending to the drafts area. Changed as the
+// run goes on: no push rights first, then an author who can push.
+let DRAFTS_STATUS = { available: false,
+  message: 'Your account can\'t make changes to “Book A” (example-org/book-a), so this chapter can\'t be sent to its drafts area.' };
+const DRAFTS_LOOK = {
+  repo: 'example-org/book-a', branch: 'drafts', head: 'h1',
+  chapter_path: 'chapters/Chapter 6.md', media_dir: 'assets/Chapter 6',
+  refused: null, exists: false, last: null, nothing_to_send: false,
+  removed: [], changed_lines: null,
+};
+const DRAFTS_MOVED = Object.assign({}, DRAFTS_LOOK, {
+  head: 'h2', exists: true, removed: ['image2.png'],
+  changed_lines: { removed: 3, added: 4 },
+  last: { who: 'cms-user', when: '2026-09-22T10:00:00Z', message: 'Update Chapter 6' },
+});
+let sendReplies = [];
 // Flipped part-way through the run, to check the screen shown when the
 // converter is missing and the one shown once it has been installed.
 let IMPORT_READY = { ready: false, where: null, version: null, can_install: true };
@@ -148,6 +164,7 @@ const fetch = async (route, opts) => {
       text: '# Chapter Six\n\nA paragraph.\n', folder: '/v/Chapters',
       media_rel: 'assets/Chapter 6',
       media: [{ rel: 'rId1.png', name: 'rId1.png', ext: 'png', size: 2048 }],
+      local_problem: null, drafts: DRAFTS_STATUS,
       counts: { lines: 3, words: 4, pictures: 1, headings: 1,
                 pipe_tables: 0, html_tables: 1, footnotes: 2 },
       notes: [
@@ -163,6 +180,10 @@ const fetch = async (route, opts) => {
       folder: '/v/Chapters',
     },
     '/api/import/cancel': { ok: true },
+    '/api/import/drafts-status': DRAFTS_STATUS,
+    '/api/import/drafts-check': DRAFTS_LOOK,
+    '/api/import/drafts-send': route === '/api/import/drafts-send'
+      ? sendReplies.shift() : null,
 
     '/api/workspace': CURRENT_WS,
     '/api/books': { books: [BOOK_A], hidden: 2, offline: false, note: '',
@@ -400,6 +421,106 @@ function check(name, cond, got) {
         calls.includes('/api/open') && calls.includes('/api/prepare'), calls);
   check('and it lands on the options screen, ready to be looked through',
         !els['step-options'].classList.contains('hidden'), 'wrong screen');
+
+  // --- sending a Word import to the drafts area -----------------------------
+
+  const said = n => [n.textContent, ...n.children.map(said)].join(' ');
+  check('an author without push rights is told before converting, on the import screen',
+        els['import-drafts-status'].textContent.includes("can't make changes"),
+        els['import-drafts-status'].textContent);
+  check('and then no send to drafts is offered for that chapter',
+        els['do-send-drafts'].disabled === true, els['do-send-drafts'].disabled);
+
+  DRAFTS_STATUS = { available: true,
+    message: 'Once it is converted you can send it to the drafts area of “Book A”.' };
+  await els['import-another'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('an author who can push is told where it can go, before converting',
+        els['import-drafts-status'].textContent.includes('drafts area of “Book A”'),
+        els['import-drafts-status'].textContent);
+  // Choosing the folder opens the vault, and the vault decides the book.
+  CURRENT_WS = WS_A_VAULT;
+  await els['choose-import-folder'].onclick();
+  await els['choose-docx'].onclick();
+  els['import-name'].value = 'Chapter 6.md';
+  await els['do-convert'].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('after converting, the drafts area is looked at for the current book',
+        calls.includes('/api/import/drafts-check') &&
+        bodies['/api/import/drafts-check'].book === 'book-a',
+        bodies['/api/import/drafts-check']);
+  check('the author is shown where on drafts the chapter will go',
+        els['import-drafts-where'].textContent.includes('chapters/Chapter 6.md') &&
+        els['import-drafts-where'].textContent.includes('“drafts”'),
+        els['import-drafts-where'].textContent);
+  check('nothing is sent until the author says they have looked',
+        els['do-send-drafts'].disabled === true, els['do-send-drafts'].disabled);
+  els['import-confirm'].checked = true;
+  els['import-confirm'].onchange({ target: els['import-confirm'] });
+  check('ticking the box offers both ways: the vault and the drafts area',
+        els['do-send-drafts'].disabled === false && els['do-import-save'].disabled === false,
+        [els['do-send-drafts'].disabled, els['do-import-save'].disabled]);
+
+  sendReplies = [{ moved: true, message: 'Nothing was sent. Something else changed the drafts area.',
+                   drafts: DRAFTS_MOVED }];
+  await els['do-send-drafts'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('the send carries the book and the drafts it was shown',
+        bodies['/api/import/drafts-send'].book === 'book-a' &&
+        bodies['/api/import/drafts-send'].head === 'h1', bodies['/api/import/drafts-send']);
+  check('if drafts moved, the author stays on the chapter and is told nothing was sent',
+        !els['step-import-preview'].classList.contains('hidden') &&
+        els['import-drafts-problem'].textContent.includes('Nothing was sent'),
+        els['import-drafts-problem'].textContent);
+  check('the fresh offer shows who changed the chapter and what sending replaces',
+        els['import-drafts-detail'].textContent.includes('cms-user') &&
+        els['import-drafts-detail'].textContent.includes('3 lines taken out, 4 put in'),
+        els['import-drafts-detail'].textContent);
+  check('and names the picture that would be taken out',
+        said(els['import-drafts-removed']).includes('image2.png'),
+        said(els['import-drafts-removed']));
+  check('the author has to look and say yes again',
+        els['import-confirm'].checked === false && els['do-send-drafts'].disabled === true,
+        [els['import-confirm'].checked, els['do-send-drafts'].disabled]);
+  els['import-confirm'].checked = true;
+  els['import-confirm'].onchange({ target: els['import-confirm'] });
+  check('replacing a chapter on drafts needs its own tick',
+        !els['import-replace-label'].classList.contains('hidden') &&
+        els['do-send-drafts'].disabled === true, els['do-send-drafts'].disabled);
+  els['import-replace'].checked = true;
+  els['import-replace'].onchange();
+  check('with both ticks, sending is offered again',
+        els['do-send-drafts'].disabled === false, els['do-send-drafts'].disabled);
+
+  sendReplies = [{ sent: true, sha: 'c0ffee', url: 'https://example.invalid/commit/c0ffee',
+                   repo: 'example-org/book-a', branch: 'drafts',
+                   chapter_path: 'chapters/Chapter 6.md', files: 1, removed: 1, saved: null }];
+  await els['do-send-drafts'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('the second send goes on the fresh offer, replacing on purpose',
+        bodies['/api/import/drafts-send'].head === 'h2' &&
+        bodies['/api/import/drafts-send'].replace === true, bodies['/api/import/drafts-send']);
+  check('once sent, the author is told it is in the drafts area, not the vault',
+        !els['step-import-done'].classList.contains('hidden') &&
+        els['import-done-title'].textContent === 'The chapter is in the drafts area',
+        els['import-done-title'].textContent);
+  check('and where it went, and that readers do not see it yet',
+        said(els['import-done-summary']).includes('chapters/Chapter 6.md') &&
+        said(els['import-done-summary']).includes("Readers don't see it"),
+        said(els['import-done-summary']));
+  check('the folder route is still there: it can be saved into the vault as well',
+        !els['import-other-way'].classList.contains('hidden') &&
+        els['import-other-way'].textContent === 'Save it into your vault as well',
+        els['import-other-way'].textContent);
+  check('going through the chapter is only offered once it is in the vault',
+        els['import-analyse'].classList.contains('hidden'), 'offered');
+  els['import-other-way'].onclick();
+  check('going back to save it asks for the tick again',
+        !els['step-import-preview'].classList.contains('hidden') &&
+        els['import-confirm'].checked === false && els['do-send-drafts'].disabled === true,
+        els['import-confirm'].checked);
+  CURRENT_WS = WS_NONE;
+  await ctx.refreshWorkspace();
 
   // --- the console: accepting is not publishing ------------------------------
 

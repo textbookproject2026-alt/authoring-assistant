@@ -504,10 +504,12 @@ def _collect_media(stage, text, link_prefix):
 
 # --- writing it into the vault ----------------------------------------------
 
-def destination_problem(folder, md_name):
-    """Why we cannot write there, in the author's words. None if we can."""
-    if not folder or not os.path.isdir(folder):
-        raise KeyError("That folder could not be found. Please choose it again.")
+def name_problem(md_name):
+    """Why a chapter cannot have this name anywhere, in the author's words.
+
+    None if it can. This is the part of destination_problem() that holds
+    wherever the chapter is going, the drafts area included.
+    """
     if not md_name.lower().endswith((".md", ".markdown")):
         return "A chapter's name has to end in .md — that is what Obsidian reads."
     stem = os.path.basename(md_name)
@@ -516,6 +518,17 @@ def destination_problem(folder, md_name):
     if re.search(r'[/\\:*?"<>|]', stem):
         return ('A chapter\'s name cannot contain any of these characters: '
                 '/ \\ : * ? " < > |')
+    return None
+
+
+def destination_problem(folder, md_name):
+    """Why we cannot write there, in the author's words. None if we can."""
+    if not folder or not os.path.isdir(folder):
+        raise KeyError("That folder could not be found. Please choose it again.")
+    problem = name_problem(md_name)
+    if problem:
+        return problem
+    stem = os.path.basename(md_name)
     target = os.path.join(folder, stem)
     if os.path.exists(target):
         return (f"There is already a chapter called “{stem}” in that folder. "

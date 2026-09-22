@@ -16,7 +16,8 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import config, console, convert, github, keychain, llm, picker, registry
+from . import (config, console, convert, drafts, github, keychain, llm,
+               picker, registry)
 from .session import Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -449,15 +450,28 @@ def r_import_convert(handler, data):
     if not name.lower().endswith((".md", ".markdown")):
         name += ".md"
 
-    problem = convert.destination_problem(IMPORT["folder"], name)
+    problem = convert.name_problem(name)
     if problem:
         raise KeyError(problem)
+    # What stops it being saved into the folder (a chapter of that name is
+    # already there, say) doesn't stop it going to the drafts area, where it
+    # replaces the chapter in a commit that can be looked back at. Only when
+    # neither can happen is the author stopped before the conversion, so they
+    # are never told at the end of a long import that it cannot land.
+    local = convert.destination_problem(IMPORT["folder"], name)
+    to_drafts, drafts_why = _drafts_availability()
+    if local and not to_drafts:
+        raise KeyError(local)
 
     _forget_import()
     try:
         result = convert.convert(IMPORT["docx"], name, IMPORT["folder"])
     except convert.ConversionFailed as e:
         raise KeyError(str(e))
+    ident = WORKSPACE["vault"]
+    result["book"] = WORKSPACE["book"]
+    result["vault"] = ident["root"] if ident else None
+    result["local_problem"] = local
     IMPORT["result"] = result
 
     found = convert.report(result)
@@ -470,6 +484,8 @@ def r_import_convert(handler, data):
         "notes": found["notes"],
         "counts": found["counts"],
         "folder": IMPORT["folder"],
+        "local_problem": local,
+        "drafts": {"available": to_drafts, "message": drafts_why},
     }
 
 
@@ -485,7 +501,9 @@ def r_import_save(handler, data):
         result.get("media_target"),
     )
     chapter_path, media_path = convert.save(result, IMPORT["folder"])
-    _forget_import()
+    # Kept, not cleared away: the same chapter can still be sent to the
+    # drafts area. It goes when another import starts, or on cancel or quit.
+    result["saved"] = chapter_path
     IMPORT["last_saved"] = chapter_path
     return {
         "chapter": chapter_path,
@@ -501,7 +519,182 @@ def r_import_cancel(handler, data):
     return {"ok": True}
 
 
+# --- sending a Word import to the drafts area -------------------------------
+#
+# The same converted chapter can be saved into the folder, sent to the book's
+# drafts area, or both. Sending is one commit on the drafts branch, made as the
+# signed-in author, on top of the drafts branch exactly as the author was shown
+# it (drafts.py). Only the book the open vault is, checked again at the moment
+# of sending, is ever written to.
+
+def _drafts_availability():
+    """Whether this import can go to a drafts area. (True/False, words)."""
+    ident = WORKSPACE["vault"]
+    if ident is None:
+        return False, ("Once you choose where in your vault the chapter goes, "
+                       "this says whether it can also be sent to the book's "
+                       "drafts area.")
+    book = _current_book()
+    if (ident["state"] != registry.OK or book is None
+            or ident["book"].slug != book.slug):
+        return False, ((ident["message"] + " ") if ident["message"] else "") + (
+            "So this chapter can't be sent to a book's drafts area. It can "
+            "still be saved into the folder.")
+    token = _token()
+    if not token:
+        return False, (
+            f"You aren't signed in, so this chapter can't be sent to the drafts "
+            f"area of “{book.title}”. Sign in under “Waiting for you” first if "
+            "you want to. It can still be saved into your vault.")
+    level = _known_access(book.slug)
+    if level is None:
+        try:
+            if _ensure_login(token) is None:
+                _check_access(token, [book])
+        except KeyError as e:
+            return False, str(e.args[0]) + " It can still be saved into your vault."
+        level = _known_access(book.slug)
+    who = f" ({CONSOLE['login']})" if CONSOLE["login"] else ""
+    if level in ("read", "none"):
+        return False, (
+            f"Your account{who} can't make changes to “{book.title}” "
+            f"({book.repo}), so this chapter can't be sent to its drafts area. "
+            "It can still be saved into your vault. The book's maintainer can "
+            "give you access.")
+    where = (f"the drafts area of “{book.title}” ({book.repo}, "
+             f"“{book.drafts_branch}”)")
+    if level is None:
+        return True, (
+            f"It could not be checked just now whether your account can change "
+            f"“{book.title}”. You can try sending it to {where}; if your account "
+            "can't, you will be told and nothing will change.")
+    return True, (f"Once it is converted you can send it to {where}, as "
+                  f"yourself{who}. Readers don't see the drafts area.")
+
+
+def r_import_drafts_status(handler, data):
+    """Said on the import screen, before anything is converted."""
+    ok, message = _drafts_availability()
+    return {"available": ok, "message": message,
+            "workspace": _workspace_info()}
+
+
+def _guard_drafts_send(book, result):
+    """Refuse unless the open vault, read again now, is `book`'s, and is the
+    vault this chapter was converted in. Raises KeyError, having sent nothing.
+    """
+    ident = WORKSPACE["vault"]
+    if ident is None:
+        raise KeyError("No vault is open, so nothing was sent. Please start "
+                       "again.")
+    fresh = registry.identify(ident["root"])
+    if fresh["key"] != ident["key"]:
+        raise KeyError(
+            f"The settings in “{ident['name']}” changed after it was opened, so "
+            "it can't be trusted to be the same book. Nothing was sent. Open "
+            "the vault again.")
+    if fresh["state"] != registry.OK:
+        raise KeyError(fresh["message"] + " Nothing was sent.")
+    if (fresh["book"].slug != book.slug or result.get("book") != book.slug
+            or result.get("vault") != ident["root"]
+            or not registry.within(ident["root"], IMPORT["folder"] or "")):
+        raise KeyError(
+            f"This chapter was converted for a different book or vault from "
+            f"“{book.title}”, the one open now. Nothing was sent. Please "
+            "convert it again.")
+
+
+def _drafts_plan(token, book, result):
+    """Read the drafts area and work out the commit. Stored on the result."""
+    paths = drafts.repo_paths(result["vault"], IMPORT["folder"],
+                              result["md_name"])
+    if paths is None:
+        raise KeyError("Where this chapter is going isn't inside the book's "
+                       "folder, so it can't be sent. Nothing was sent.")
+    chapter_path, media_dir = paths
+    state = _unwrap(drafts.read(token, book, chapter_path, media_dir))
+    entries = []
+    if not state["refused"]:
+        entries = drafts.build_tree(chapter_path,
+                                    result["text"].encode("utf-8"), media_dir,
+                                    drafts.pictures(result),
+                                    state["on_drafts"])
+    result["drafts"] = {"book": book.slug, "state": state, "entries": entries,
+                        "chapter_path": chapter_path}
+    shown = drafts.describe(book, state, entries, chapter_path, media_dir,
+                            result["text"])
+    shown["head"] = state["head"]
+    return shown
+
+
+def r_import_drafts_check(handler, data):
+    """What sending would do. Reads the drafts area; changes nothing."""
+    token = _token()
+    if not token:
+        _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
+    result = IMPORT.get("result")
+    if not result:
+        raise KeyError("There is nothing converted to send. Please start again.")
+    _guard_drafts_send(book, result)
+    return _drafts_plan(token, book, result)
+
+
+def r_import_drafts_send(handler, data):
+    """One commit on the drafts branch, or a refusal that changed nothing."""
+    token = _token()
+    if not token:
+        _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
+    result = IMPORT.get("result")
+    if not result:
+        raise KeyError("There is nothing converted to send. Please start again.")
+    _guard_drafts_send(book, result)
+    plan = result.get("drafts")
+    if not plan or plan["book"] != book.slug:
+        raise KeyError("Please look at what will be sent again before sending.")
+    state = plan["state"]
+    if data.get("head") != state["head"]:
+        raise KeyError("This screen is out of date, so nothing was sent. "
+                       "Please look at what will be sent again.")
+    if state["refused"]:
+        raise KeyError(state["refused"])
+    if state["exists"] and not data.get("replace"):
+        raise KeyError(
+            "A chapter of this name is already in the drafts area. Tick the "
+            "box to say it should be replaced, or go back and give this one "
+            "a different name. Nothing was sent.")
+
+    name = os.path.basename(result["md_name"])
+    message = (f"Bring in {name} from Word\n\n"
+               f"Converted from “{os.path.basename(result['docx'])}” by the "
+               "Authoring Assistant.")
+    sent = drafts.send(token, book, state, plan["entries"], message)
+    if isinstance(sent, dict) and sent.get("moved"):
+        result["drafts"] = None
+        shown = _drafts_plan(token, book, result)
+        return {"moved": True, "message": drafts.MOVED, "drafts": shown}
+    sent = _unwrap(sent)
+    result["sent"] = sent["sha"]
+    result["drafts"] = None
+    removed = [e["path"] for e in plan["entries"] if e["data"] is None]
+    return {
+        "sent": True,
+        "sha": sent["sha"],
+        "url": sent.get("url"),
+        "repo": book.repo,
+        "branch": book.drafts_branch,
+        "chapter_path": plan["chapter_path"],
+        "files": len(plan["entries"]) - len(removed),
+        "removed": len(removed),
+        "saved": result.get("saved"),
+    }
+
+
 def r_quit(handler, data):
+    _forget_import()
     threading.Timer(0.4, SHUTDOWN.set).start()
     return {"stopping": True}
 
@@ -1461,6 +1654,9 @@ ROUTES = {
     "/api/import/convert": r_import_convert,
     "/api/import/save": r_import_save,
     "/api/import/cancel": r_import_cancel,
+    "/api/import/drafts-status": r_import_drafts_status,
+    "/api/import/drafts-check": r_import_drafts_check,
+    "/api/import/drafts-send": r_import_drafts_send,
 
     "/api/workspace": r_workspace,
     "/api/vault/close": r_vault_close,

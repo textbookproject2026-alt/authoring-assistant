@@ -15,6 +15,7 @@ result or a Problem, and a Problem carries a plain-English sentence plus a flag
 saying whether signing in again would fix it.
 """
 
+import base64
 import json
 import time
 import urllib.error
@@ -392,6 +393,103 @@ def close_change(token, book, number):
         payload={"state": "closed"},
     )
 
+
+
+# --- one commit on the drafts branch -----------------------------------------
+#
+# A Word import reaches the drafts branch as one commit made with the Git Data
+# API: the files are uploaded, a tree is made on top of the drafts branch as it
+# was read, a commit is made on that, and the branch is moved to the commit
+# without force. If anything else (the browser editor, an accepted change)
+# moved the branch after it was read, that last step is refused by the service,
+# so nothing anyone else wrote can be overwritten. Only the drafts branch is
+# ever named here, never the live one.
+
+def _ref_url(book, branch):
+    return (f"{API}/repos/{book.repo}/git/refs/heads/"
+            f"{urllib.parse.quote(branch, safe='/')}")
+
+
+def branch_head(token, book):
+    """The commit the drafts branch points at now, or a Problem."""
+    result = _request("GET", f"{API}/repos/{book.repo}/git/ref/heads/"
+                      f"{urllib.parse.quote(book.drafts_branch, safe='/')}",
+                      token=token)
+    if isinstance(result, Problem):
+        return result
+    return ((result.get("object") or {}).get("sha")) or Problem(
+        "The drafts area could not be read. Nothing was changed.")
+
+
+def commit_tree(token, book, sha):
+    """The tree a commit holds, or a Problem."""
+    result = _request("GET", f"{API}/repos/{book.repo}/git/commits/{sha}",
+                      token=token)
+    if isinstance(result, Problem):
+        return result
+    return ((result.get("tree") or {}).get("sha")) or Problem(
+        "The drafts area could not be read. Nothing was changed.")
+
+
+def whole_tree(token, book, tree_sha):
+    """Every file in a tree, with the flag saying whether the list was cut short."""
+    return _request("GET", f"{API}/repos/{book.repo}/git/trees/{tree_sha}"
+                    f"?recursive=1", token=token)
+
+
+def blob_text(token, book, sha):
+    """The text of one stored file, by its hash."""
+    result = _request("GET", f"{API}/repos/{book.repo}/git/blobs/{sha}",
+                      token=token)
+    if isinstance(result, Problem):
+        return result
+    try:
+        return base64.b64decode(result.get("content") or "").decode(
+            "utf-8", "replace")
+    except (ValueError, TypeError):
+        return Problem("An unreadable reply came back. Nothing was changed.")
+
+
+def last_change(token, book, path, sha):
+    """Who last changed a file, as of a commit. None if that isn't known."""
+    url = (f"{API}/repos/{book.repo}/commits?sha={sha}"
+           f"&path={urllib.parse.quote(path)}&per_page=1")
+    result = _request("GET", url, token=token)
+    if isinstance(result, Problem) or not result:
+        return None
+    item = result[0]
+    commit = item.get("commit") or {}
+    return {
+        "who": ((item.get("author") or {}).get("login")
+                or (commit.get("author") or {}).get("name") or ""),
+        "when": (commit.get("author") or {}).get("date"),
+        "message": (commit.get("message") or "").split("\n")[0],
+    }
+
+
+def create_blob(token, book, data):
+    return _request("POST", f"{API}/repos/{book.repo}/git/blobs", token=token,
+                    payload={"content": base64.b64encode(data).decode("ascii"),
+                             "encoding": "base64"})
+
+
+def create_tree(token, book, base_tree, entries):
+    return _request("POST", f"{API}/repos/{book.repo}/git/trees", token=token,
+                    payload={"base_tree": base_tree, "tree": entries})
+
+
+def create_commit(token, book, message, tree, parent):
+    """A commit with no author given, so it is the signed-in author's."""
+    return _request("POST", f"{API}/repos/{book.repo}/git/commits", token=token,
+                    payload={"message": message, "tree": tree,
+                             "parents": [parent]})
+
+
+def move_drafts(token, book, sha):
+    """Move the drafts branch to `sha`, only if that is a step forward from
+    where it is now. Never forced."""
+    return _request("PATCH", _ref_url(book, book.drafts_branch), token=token,
+                    payload={"sha": sha, "force": False})
 
 
 # --- the one door from the drafts area to the live book ----------------------
