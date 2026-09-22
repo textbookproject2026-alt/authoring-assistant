@@ -27,10 +27,11 @@ import urllib.request
 # registry resolved (registry.py) and uses only its values.
 #
 # Each book has two branches the console cares about. Everything proposed — a
-# contributor's change accepted here, or a draft written in the browser CMS —
-# lands on the drafts branch. The live branch is what readers see. Nothing
-# reaches the live branch except through a pull request from the drafts branch,
-# which is the only door and is the door the console opens.
+# contributor's change accepted here, or a browser edit once it is published
+# (until then it waits on a branch of its own) — lands on the drafts branch.
+# The live branch is what readers see. Nothing reaches the live branch except
+# through a pull request from the drafts branch, which is the only door and is
+# the door the console opens.
 
 API = "https://api.github.com"
 DEVICE_CODE_URL = "https://github.com/login/device/code"
@@ -43,6 +44,7 @@ SCOPE = "public_repo"
 
 USER_AGENT = "Authoring-Assistant"
 TIMEOUT = 30
+ARCHIVE_TIMEOUT = 300   # a whole book, pictures and all
 
 # The four jobs that run themselves every week, and the file each one lives in.
 WEEKLY_JOBS = [
@@ -397,12 +399,13 @@ def close_change(token, book, number):
 
 # --- one commit on the drafts branch -----------------------------------------
 #
-# A Word import reaches the drafts branch as one commit made with the Git Data
-# API: the files are uploaded, a tree is made on top of the drafts branch as it
-# was read, a commit is made on that, and the branch is moved to the commit
-# without force. If anything else (the browser editor, an accepted change)
-# moved the branch after it was read, that last step is refused by the service,
-# so nothing anyone else wrote can be overwritten. Only the drafts branch is
+# A Word import, a tidy of citations and links, or an accepted suggestion
+# reaches the drafts branch as one commit made with the Git Data API: the
+# files are uploaded, a tree is made on top of the drafts branch as it was
+# read, a commit is made on that, and the branch is moved to the commit
+# without force. If anything else (a browser edit being published, an accepted
+# change) moved the branch after it was read, that last step is refused by the
+# service, so nothing anyone else wrote can be overwritten. Only the drafts branch is
 # ever named here, never the live one.
 
 def _ref_url(book, branch):
@@ -437,17 +440,24 @@ def whole_tree(token, book, tree_sha):
                     f"?recursive=1", token=token)
 
 
-def blob_text(token, book, sha):
-    """The text of one stored file, by its hash."""
+def blob_bytes(token, book, sha):
+    """The exact contents of one stored file, by its hash."""
     result = _request("GET", f"{API}/repos/{book.repo}/git/blobs/{sha}",
                       token=token)
     if isinstance(result, Problem):
         return result
     try:
-        return base64.b64decode(result.get("content") or "").decode(
-            "utf-8", "replace")
+        return base64.b64decode(result.get("content") or "")
     except (ValueError, TypeError):
         return Problem("An unreadable reply came back. Nothing was changed.")
+
+
+def blob_text(token, book, sha):
+    """The text of one stored file, by its hash, for showing only."""
+    data = blob_bytes(token, book, sha)
+    if isinstance(data, Problem):
+        return data
+    return data.decode("utf-8", "replace")
 
 
 def last_change(token, book, path, sha):
@@ -492,10 +502,36 @@ def move_drafts(token, book, sha):
                     payload={"sha": sha, "force": False})
 
 
+def drafts_archive(token, book):
+    """Every file on the drafts branch, as one compressed archive (bytes).
+
+    One request, however many pictures the book has. Returns a Problem on
+    failure. Reading only: nothing is changed.
+    """
+    url = (f"{API}/repos/{book.repo}/tarball/"
+           f"{urllib.parse.quote(book.drafts_branch, safe='/')}")
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("User-Agent", USER_AGENT)
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=ARCHIVE_TIMEOUT) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        return _http_problem(e)
+    except urllib.error.URLError:
+        return Problem("This Mac is not online, so nothing could be fetched.",
+                       offline=True)
+    except (TimeoutError, OSError):
+        return Problem("The connection timed out. Try again in a moment.",
+                       offline=True)
+
+
 # --- the one door from the drafts area to the live book ----------------------
 #
 # The drafts branch is long-lived and shared: an accepted change lands there, and
-# so does every draft written in the browser CMS. So there is exactly one pull
+# so does every browser edit once it is published. So there is exactly one pull
 # request from the drafts branch into the live branch at a time, and it carries whatever `drafts` holds at
 # the moment it is looked at — not one change in isolation. Accepting reopens or
 # refreshes that one request rather than opening a second.

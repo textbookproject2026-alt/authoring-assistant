@@ -29,6 +29,15 @@ THANKS = (
     "Thank you for this — it has been taken on board and the chapter has been "
     "updated.\n\n_Replied from the author's console._"
 )
+
+
+def thanks_with_change(url):
+    """The thank-you when the tool made the change in the drafts area."""
+    return (
+        "Thank you for this — it has been taken on board, and the chapter has "
+        f"been changed in the drafts: {url}\n\nIt reaches readers the next "
+        "time the book goes live.\n\n_Replied from the author's console._"
+    )
 DECLINED = (
     "Thank you for taking the time to send this. After a look, the text is going "
     "to stay as it is for now — but the suggestion was read and appreciated, and "
@@ -174,39 +183,90 @@ def plan_change(vault_root, path, suggestion_text):
         out["reason"] = "That chapter could not be read from disk."
         return out
 
+    out.update(_find_once(text, pair, full))
+    return out
+
+
+def _find_once(text, pair, where):
+    """Where in `text` the old wording is, if it is there exactly once and on
+    one line. The fields plan_change fills in."""
     count = text.count(pair["old"])
     if count == 0:
-        out["reason"] = (
+        return {"reason": (
             f"The wording “{pair['old']}” is not in that chapter any "
-            "more — it may already have been fixed."
-        )
-        return out
+            "more — it may already have been fixed.")}
     if count > 1:
-        out["reason"] = (
+        return {"reason": (
             f"The wording “{pair['old']}” appears {_times(count)} in that "
-            "chapter, so the tool cannot tell which one is meant."
-        )
-        return out
+            "chapter, so the tool cannot tell which one is meant.")}
 
-    docmap = DocMap(text, full)
+    docmap = DocMap(text, where)
     for i, line in enumerate(docmap.lines):
         start = line.find(pair["old"])
         if start == -1:
             continue
-        out.update({
+        return {
             "can_apply": True,
-            "file_path": full,
+            "file_path": where,
             "old": pair["old"],
             "new": pair["new"],
             "line_no": i + 1,
             "before": line,
             "after": line[:start] + pair["new"] + line[start + len(pair["old"]):],
             "reason": "",
-        })
-        return out
+        }
+    return {"reason": "That wording spans more than one line, so it was left alone."}
 
-    out["reason"] = "That wording spans more than one line, so it was left alone."
+
+def plan_in_text(text, path, suggestion_text):
+    """plan_change, for a chapter's text as the drafts area holds it.
+
+    `text` is None when the page isn't in the drafts area. The plan carries
+    the text it was worked out on, so that applying it can prove nothing
+    else moved.
+    """
+    out = {"can_apply": False, "reason": "", "vault": "", "file_path": "",
+           "old": "", "new": "", "line_no": None, "before": "", "after": "",
+           "text": text}
+    pair = literal_replacement(suggestion_text or "")
+    if not pair:
+        out["reason"] = (
+            "This suggestion is written as a comment rather than as an exact "
+            "replacement, so the tool will not change the chapter itself."
+        )
+        return out
+    if text is None:
+        out["reason"] = (
+            f"The page “{_page_name(path)}” is not in the drafts area, so the "
+            "tool cannot look at it."
+        )
+        return out
+    out.update(_find_once(text, pair, path))
     return out
+
+
+def change_text(plan):
+    """The chapter's new text for a drafts plan. Returns (text, None), or
+    (None, why). Only the one line changes; every other line is copied through
+    byte for byte, and that is checked here rather than trusted."""
+    text = plan.get("text")
+    if not plan.get("can_apply") or text is None:
+        return None, "There is nothing that can be applied automatically."
+    docmap = DocMap(text, plan.get("file_path"))
+    line_index = int(plan["line_no"]) - 1
+    if not 0 <= line_index < len(docmap.lines) or \
+            docmap.lines[line_index] != plan["before"]:
+        return None, "That chapter has changed since this was worked out."
+    start = plan["before"].find(plan["old"])
+    edit = Edit(line_index, start, start + len(plan["old"]), plan["new"],
+                origin="suggestion")
+    new_text, changed = apply_edits(docmap, [edit])
+    new_map = DocMap(new_text, plan.get("file_path"))
+    if changed != {line_index} or len(new_map.lines) != len(docmap.lines) or \
+            any(a != b for i, (a, b) in enumerate(zip(docmap.lines, new_map.lines))
+                if i != line_index):
+        return None, "The change did not come out as expected, so nothing was sent."
+    return new_text, None
 
 
 def apply_change(plan):
@@ -333,7 +393,7 @@ def describe_change(pr):
 # --- getting the drafts to readers -------------------------------------------
 #
 # Accepting a change puts it in the drafts area and no further. The drafts area
-# is shared — it also holds whatever has been written in the browser editor — so
+# is shared — it also holds whatever has been published from the browser editor — so
 # what goes to readers is always the drafts area as a whole, never one change on
 # its own. That is what the publish request describes, and why its description
 # is rewritten every time rather than added to.
@@ -344,7 +404,7 @@ PUBLISH_INTRO = (
     "Everything now waiting in the drafts area, gathered so that it can go to "
     "readers in one go.\n\n"
     "This is not only the change that was accepted most recently. The drafts "
-    "area also holds anything written in the browser editor, so what follows is "
+    "area also holds anything published from the browser editor, so what follows is "
     "the drafts area exactly as it stood when this description was last "
     "rewritten. Merging this is what publishes it; until then nothing here has "
     "reached a reader."
@@ -365,6 +425,27 @@ PUBLISHED_STEPS = [
     "before you write there again, or your copy and the live book will "
     "disagree with each other.",
 ]
+
+# For a book whose site is built from the repository, not published from the
+# author's folder. The drafts area is where the author carries on, so there is
+# no copy to bring up to date.
+PUBLISHED_STEPS_BUILT = [
+    "The drafts were sent to the live book.",
+    "The site rebuilds itself from there, which takes a few minutes. Readers "
+    "see the change once it has.",
+    "The drafts area and the live book now hold the same text, so you can "
+    "carry on in the drafts area straight away.",
+]
+
+
+def published_steps(book):
+    """What the author is told once the drafts have gone live.
+
+    The Obsidian wording stays for a book still published from the author's
+    folder (its registry entry says "obsidian-publish") and goes once that
+    changes.
+    """
+    return list(PUBLISHED_STEPS if book.from_folder else PUBLISHED_STEPS_BUILT)
 
 # How many of each to name before saying "and more". A description nobody can
 # read is no more honest than no description at all.
@@ -439,6 +520,15 @@ PUBLISH_STATE_WORDS = {
         "undone — open it in your browser to settle which wording wins, or "
         "publish your own copy from Obsidian first and check back here."
     ),
+    # The same, for a book built from the repository: there is no copy of
+    # the author's own to publish first.
+    "conflict_built": (
+        "This cannot be published as it stands: the same wording has been "
+        "changed both in the drafts area and in the live book, and the tool "
+        "will not choose between them. Nothing was lost and nothing has been "
+        "undone — open it in your browser to settle which wording wins, then "
+        "check back here."
+    ),
     "blocked": (
         "This is waiting on the book's own checks before it can go to readers. "
         "That usually takes a few minutes; press “Check again” shortly."
@@ -450,7 +540,13 @@ PUBLISH_STATE_WORDS = {
 }
 
 
-def describe_publish(pr, compare, state):
+def publish_state_words(state, book):
+    if state == "conflict" and not book.from_folder:
+        state = "conflict_built"
+    return PUBLISH_STATE_WORDS.get(state, PUBLISH_STATE_WORDS["unknown"])
+
+
+def describe_publish(pr, compare, state, book):
     """The publish request, in the author's vocabulary."""
     compare = compare if isinstance(compare, dict) else {}
     files = [f for f in (compare.get("files") or []) if isinstance(f, dict)]
@@ -471,7 +567,6 @@ def describe_publish(pr, compare, state):
         "change_count": len(commits),
         "who": who,
         "state": state,
-        "state_words": PUBLISH_STATE_WORDS.get(state,
-                                               PUBLISH_STATE_WORDS["unknown"]),
+        "state_words": publish_state_words(state, book),
         "can_publish": state == "clean",
     }

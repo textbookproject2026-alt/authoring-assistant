@@ -69,6 +69,29 @@ into a chapter in your vault. See "Bringing in a Word document" below.
 The tool asks where your chapters are every single time. It remembers nothing
 between runs, so it can never surprise you by working on the wrong file.
 
+### A chapter in the drafts area, with no folder
+
+Choose **A chapter in the drafts area** instead of a file or folder, and the
+tool lists the chapters of the chosen book as its **drafts area** holds them.
+Nothing on this Mac is needed. The questions are the same, the concept pages
+and the glossary are the drafts area's own, and at the end the button reads
+**Send to drafts**: the changes go there as one change, made by you. As
+everywhere else, **only the lines shown change**.
+
+If anything else changed the drafts area while you were answering (an edit
+published from the browser editor, or a change you accepted), nothing is sent.
+If your chapter and the glossary are as they were, the same changes are
+offered again and you press **Send to drafts** once more; if they changed, the
+tool reads the chapter again and you go through it again. It never writes over
+anyone else's work.
+
+If your account can't make changes to the book, the tool says so before you
+start, not at the end.
+
+**Download a copy** (under the choices) puts every file of the book, as the
+drafts area holds them, into a new folder on this Mac. It never writes over a
+folder that is already there.
+
 ---
 
 ## Things you should know
@@ -129,7 +152,7 @@ is, and you can go back to it at any time.
 
 If you are signed in to the console and can make changes to the book, the
 converted chapter can also go straight to the book's **drafts area**, the same
-place the browser editor writes to. Press **Send to drafts** instead of, or as
+place accepted changes, and browser edits once published, go to. Press **Send to drafts** instead of, or as
 well as, **Save this chapter**. The chapter and its pictures arrive as one
 change, made by you, and readers don't see it until the drafts go live.
 
@@ -141,8 +164,8 @@ account**, and you can still save the chapter into your vault.
   area. You are shown who last changed it and how many lines differ, any
   pictures the Word document no longer has are listed (they are taken out), and
   you tick a second box to say yes.
-- **If anyone else changes the drafts area while you are reading** (the
-  browser editor, say), nothing is sent. The tool looks again, shows you what
+- **If anyone else changes the drafts area while you are reading** (an edit
+  published from the browser editor, say), nothing is sent. The tool looks again, shows you what
   is there now, and you press **Send to drafts** again. It never writes over
   anyone else's work.
 
@@ -250,14 +273,15 @@ Everything under "Waiting for you" belongs to **one book at a time**. The band
 just under the title always says which book that is, where it is kept, which
 vault is open, and which GitHub account you are signed in as.
 
-- **With no vault open**, you choose the book. The tool lists only the books your
-  account can make changes to, and remembers your choice for next time. Press
-  **Change book** in the band to switch.
-- **With a vault open** — whether you opened it under Chapters or under "Waiting
-  for you" — **the vault decides the book**. To work on a different book, press
-  **Change book (closes this vault)**: it closes the vault and takes you
-  straight to the list of books. This is what makes it impossible to write one
-  book's suggestion into another book's chapter.
+- **You choose the book**, and that choice decides. The tool lists only the
+  books your account can make changes to, and remembers your choice for next
+  time. Press **Change book** in the band to switch. You don't need a vault:
+  chapters are changed in the book's drafts area.
+- **A vault** — whether you opened it under Chapters or under "Waiting for
+  you" — can only be your copy of the chosen book. Opening a copy of a
+  different book is refused, and choosing a different book closes the vault.
+  This is what makes it impossible to write one book's suggestion into another
+  book's chapter.
 - A vault the tool can't match to a registered book is **refused** with the
   reason: for example, "This vault is a copy of *X*, but *Y* is kept in *Z*."
   Nothing is written into it. A vault that doesn't claim to be any book (a folder
@@ -316,9 +340,16 @@ in this tool: **only that one line changes**, and every other line of the chapte
 is left exactly as it was. If the wording appears twice, or not at all, the tool
 says so and leaves it to you rather than guessing.
 
-For this to work the tool needs the book's vault open. There is an **Open the
-vault** button at the bottom of the list. The tool only ever changes a chapter in
-a vault it has just checked is the same book the suggestion was sent to.
+The change is made in the book's **drafts area**, as one change made by you, and
+the thank-you links to it. No vault is needed. If anything else changed the
+drafts area while you were looking, nothing is changed, nothing is sent, the
+suggestion stays open, and you are shown the change again to accept once more.
+
+While the book is still published from your vault (book one, until it moves),
+and that vault is open, you are also offered **Also make it in my vault**,
+ticked to start with, so readers see it at the next publish from Obsidian. The
+tool only ever changes a chapter in a vault it has just checked is the same
+book the suggestion was sent to.
 
 ### Draft changes
 
@@ -341,8 +372,8 @@ browser instead of printing a wall of text at you.
 ### Going live
 
 Underneath the two lists is **Going live**: everything you have accepted, waiting
-in one place. The drafts area is shared — anything written in the browser editor
-is in there too — so what you see here is all of it together, and all of it is
+in one place. The drafts area is shared — anything published from the browser
+editor is in there too — so what you see here is all of it together, and all of it is
 what goes to readers.
 
 Open it and you are shown how many changes there are, which pages they touch and
@@ -358,15 +389,18 @@ and you should see it before it goes.
 **The site takes a few minutes to catch up.** It rebuilds itself after you
 publish; readers see the change once it has.
 
-**Your vault will be behind afterwards.** Publishing writes to the live book, and
-your vault does not know about it. Take the latest into Obsidian before you write
-there again, or your copy and the live book will disagree with each other.
+**Your vault will be behind afterwards** — while the book is published from your
+vault. Publishing writes to the live book, and your vault does not know about
+it. Take the latest into Obsidian before you write there again, or your copy and
+the live book will disagree with each other. For a book built from its
+repository there is no copy to bring up to date: you carry on in the drafts
+area, and the tool says so.
 
 If the same wording has been changed both in the drafts area and in the live book
 — usually because you edited that line in Obsidian too — the tool says so plainly
 and refuses to guess which one wins. Nothing is lost and nothing is undone. Sort
-it out in your browser, or publish your own copy from Obsidian first and then
-press **Check again**.
+it out in your browser (or, while the book is published from your vault,
+publish your own copy from Obsidian first) and then press **Check again**.
 
 ### The weekly jobs
 

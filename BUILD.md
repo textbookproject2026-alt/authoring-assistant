@@ -322,11 +322,15 @@ No book's repository, branches or site is written into the app. They come from
   (a private repo is never offered, since `public_repo` can't reach it). The
   answer is saved per account in `state.json` for offline use, and cleared on
   sign-out. The last choice is remembered as `last_book`.
-- **The vault decides.** One vault is open for the whole app, whichever half
-  opened it. Opening it reads `textbook.config.json`'s `slug` and the
+- **The chosen book decides** (BOOK-ONE-TO-QUARTZ §8 step 2). At most one vault
+  is open for the whole app, whichever half opened it, and it can only be the
+  chosen book's copy. Opening it reads `textbook.config.json`'s `slug` and the
   `origin` remote in `.git/config` (worktrees followed; host ignored, since the
   maintainer uses an SSH alias), and both must match one registered book, or
-  the vault is refused. An open vault sets the book and locks the picker.
+  the vault is refused. A vault of a book other than the chosen one is refused
+  too; with no book chosen, it chooses its book. Choosing another book closes
+  it (and drops a Word import headed into it). A folder linked to no book stays
+  open for the Chapters tools whatever book is chosen.
 - **The write is what enforces it.** Before a suggestion is written into a
   chapter, `_guard_book_write` re-reads the vault's identity from disk and
   refuses unless it is unchanged since opening, is still the book the suggestion
@@ -339,6 +343,44 @@ No book's repository, branches or site is written into the app. They come from
   for, and the server refuses any request whose slug isn't the current book, so
   a stale tab can't act on the wrong one. The suggestion text used for a plan is
   the one the server fetched for that book, not what the page sends.
+
+### Writing to the drafts area (BOOK-ONE-TO-QUARTZ §8 steps 1-2)
+
+A Word import (step 1), a tidy of a chapter's citations, links and glossary,
+and an accepted suggestion (step 2) each reach the chosen book's
+`content.drafts_branch` as **one commit through the Git Data API**: blobs, a
+tree on top of the drafts tree as it was read, a commit with no `author` (so
+it is the token's owner), then `PATCH git/refs/heads/<drafts>` with
+`force: false`. The live branch is never named, and a book whose two branches
+are the same is refused. If drafts moved after it was read, the ref update is
+refused, nothing is written, and the app reads drafts again and offers the
+work again (`drafts.send`, `MOVED*`).
+
+- **Edits send only what changed.** A tidy works on a `DraftsSession`
+  (`session.py`): the chapter, the concept pages and the chapter's
+  `glossary.md` (the nearest above it; with none, a new one at the top of the
+  book, or of `content/` for a Quartz-shaped book) come from one snapshot of
+  drafts (`drafts.snapshot`), and the same
+  `build_preview` assertion as on disk proves no untouched line moved before
+  anything is sent. Files are decoded strictly as UTF-8 (a file that isn't is
+  refused), and line endings are kept. A suggestion's one-line change is proved
+  the same way in `console.change_text`. A suggestion's page must be a plain
+  path in the drafts tree (`drafts.safe_path`).
+- **Moved but untouched.** If drafts moved but the chapter's and glossary's
+  blobs are unchanged, the tidy's choices stand and are offered on the new
+  head; otherwise the chapter is read again and gone through again.
+- **Push rights are checked up front** (`_drafts_book`), before the drafts area
+  is opened, as well as at sending.
+- **The vault route stays** while a book's `site.host.kind` is
+  `obsidian-publish` (`Book.from_folder`): Publish uploads from the author's
+  folder, so the Chapters tools still save to disk, and an accepted suggestion
+  can also be written into the open vault (ticked by default). The Obsidian
+  wording in `console.PUBLISHED_STEPS` and the conflict advice is kept for those
+  books only (`published_steps`, `publish_state_words`), until step 17 records
+  book one's new host.
+- **"Download a copy"** fetches `GET /repos/{repo}/tarball/<drafts>` and unpacks
+  regular files only into a new folder (`drafts.unpack_copy`); links and paths
+  leading out of it are left out.
 
 ### The scope, and why it is narrow
 
@@ -383,9 +425,10 @@ decision is not silently reversed later.
 **It does not apply reader suggestions to chapters by guessing.** A suggestion is
 free prose with no target and no replacement text. The console applies a change
 itself only when the suggestion contains an exact quoted replacement AND the old
-wording appears in the chapter exactly once — verified against the file on disk,
-and written through the same `apply_edits` path as the analyses, so the
-untouched-lines guarantee holds. Everything else is handed to the author with the
+wording appears in the chapter exactly once — verified against the chapter on
+drafts (and the file on disk, when the vault route is used), and written through
+the same `apply_edits` path as the analyses, so the untouched-lines guarantee
+holds. Everything else is handed to the author with the
 suggestion pinned beside it. See the tests under "The console" in
 `tests/test_all.py`.
 
@@ -423,16 +466,17 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 350 checks: the analyses, the file-safety promises,
+python3 -m tests.test_all     # 405 checks: the analyses, the file-safety promises,
                               #             the Word conversion, the console's
                               #             refusal rules, the path from accepting
                               #             a change to the live book, the
                               #             registry, the book picker, the vault
-                              #             and book mismatch refusals, and the
-                              #             words the troubleshooting guide quotes
-node tests/ui_flow.js         # 111 checks: the review, import, book-choosing and
-                              #            going-live flows, driven against the
-                              #            real app.js
+                              #             and book mismatch refusals, the writes
+                              #             to the drafts area, and the words the
+                              #             troubleshooting guide quotes
+node tests/ui_flow.js         # 123 checks: the review, drafts, import,
+                              #            book-choosing and going-live flows,
+                              #            driven against the real app.js
 ```
 
 The Python suite covers the things that must never break: that untouched lines

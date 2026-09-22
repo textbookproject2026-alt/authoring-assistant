@@ -10,6 +10,7 @@ linked, is what makes a second run quiet rather than duplicating work.
 """
 
 import os
+import posixpath
 import re
 
 from .mdmap import sentence_around
@@ -117,6 +118,54 @@ def discover_concept_pages(root, current_path, folder=None):
                 "rel": os.path.relpath(full, root),
                 "titles": titles,
             })
+    return pages, (described or ".")
+
+
+def concept_pages_in(paths, current, read_head, folder=None):
+    """discover_concept_pages, for a book held as a list of file paths (with
+    "/", from the top of the book) rather than a folder on this Mac.
+
+    `read_head(path)` returns the start of a page's text, or None. The same
+    folders are skipped and the same folder of definitions is preferred.
+    """
+    def kept(path):
+        return not any(d in IGNORE_DIRS or d.startswith(".")
+                       for d in path.split("/")[:-1])
+
+    notes = [p for p in sorted(paths) if p.endswith(".md") and kept(p)]
+    search, described = "", None
+    if folder:
+        search = described = folder.strip("/")
+    else:
+        counts = {}
+        for p in notes:
+            here = posixpath.dirname(p)
+            counts[here] = counts.get(here, 0) + 1
+        best = None
+        for here in sorted(counts):
+            if posixpath.basename(here).casefold() in CONCEPT_FOLDER_NAMES \
+                    and counts[here] >= 2 \
+                    and (best is None or counts[here] > best[1]):
+                best = (here, counts[here])
+        if best:
+            search = described = best[0]
+
+    pages = []
+    for p in notes:
+        if search and not p.startswith(search + "/"):
+            continue
+        if p == current:
+            continue
+        stem = posixpath.basename(p)[:-3]
+        if stem.casefold() in IGNORE_STEMS or stem.casefold() in STOP_TITLES:
+            continue
+        if len(stem) < 3:
+            continue
+        titles = [stem]
+        head = read_head(p)
+        if head:
+            titles.extend(_aliases_from_frontmatter(head[:2000]))
+        pages.append({"title": stem, "path": p, "rel": p, "titles": titles})
     return pages, (described or ".")
 
 
