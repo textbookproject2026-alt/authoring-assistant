@@ -126,6 +126,11 @@ const DRAFTS_MOVED = Object.assign({}, DRAFTS_LOOK, {
   last: { who: 'cms-user', when: '2026-09-22T10:00:00Z', message: 'Update Chapter 6' },
 });
 let sendReplies = [];
+// Signing out and in again. The fake server refuses a sign-out when told to,
+// as the real one does when the Keychain still has the token afterwards.
+let SIGNED_IN = true;
+let signoutReply = null;
+let signinReply = { waiting: true, wait: 5 };
 // Flipped part-way through the run, to check the screen shown when the
 // converter is missing and the one shown once it has been installed.
 let IMPORT_READY = { ready: false, where: null, version: null, can_install: true };
@@ -135,7 +140,7 @@ const fetch = async (route, opts) => {
   const body = JSON.parse(opts.body || '{}');
   bodies[route] = body;
   if (route === '/api/books/choose') CURRENT_WS = body.slug === 'book-b' ? WS_B : WS_A;
-  if (route === '/api/vault/close') CURRENT_WS = WS_A;
+  if (route === '/api/vault/close' || route === '/api/books/switch') CURRENT_WS = WS_A;
   const reply = {
     '/api/env': {
       pandoc: true, deepseek: false, deepseek_hint: null, obsidian_running: false,
@@ -190,7 +195,14 @@ const fetch = async (route, opts) => {
                     workspace: CURRENT_WS },
     '/api/books/choose': CURRENT_WS,
     '/api/vault/close': CURRENT_WS,
-    '/api/console/status': { configured: true, signed_in: true, who: 'The Author',
+    '/api/books/switch': CURRENT_WS,
+    '/api/account': CURRENT_WS,
+    '/api/console/signout': route === '/api/console/signout'
+      ? (signoutReply ? Object.assign({}, signoutReply, { workspace: CURRENT_WS }) : null) : null,
+    '/api/console/signin-start': { code: 'ABCD-1234', url: 'https://github.com/login/device', minutes: 15 },
+    '/api/console/signin-poll': signinReply,
+    '/api/console/status': { configured: true, signed_in: SIGNED_IN, who: 'The Author',
+                             login: SIGNED_IN ? 'author' : null,
                              keychain: true, workspace: CURRENT_WS },
     '/api/console/load': {
       book: CURRENT_WS.book, workspace: CURRENT_WS,
@@ -230,17 +242,22 @@ const fetch = async (route, opts) => {
       changed_lines: [4],
     }; })(),
   }[route] || {};
+  if (reply && reply.__refuse) {
+    return { ok: false, status: 400, json: async () => ({ error: reply.__refuse }) };
+  }
+  if (route === '/api/console/signout' && reply && !reply.__refuse) SIGNED_IN = false;
   return { ok: true, json: async () => reply };
 };
 
 const listeners = {};
 let beacons = 0;
 const ctx = {
-  document, fetch, console, setInterval, clearInterval, setTimeout,
+  document, fetch, console, setInterval, clearInterval, setTimeout, clearTimeout,
   encodeURIComponent,
   navigator: { sendBeacon: () => { beacons++; return true; } },
   window: {
     scrollTo() {},
+    open() {},
     addEventListener: (name, fn) => { listeners[name] = fn; },
   },
 };
@@ -616,9 +633,10 @@ function check(name, cond, got) {
   CURRENT_WS = WS_A_VAULT;
   await els['console-refresh'].onclick();
   await new Promise(r => setTimeout(r, 20));
-  check('with a vault open, the book can’t be changed from the bar',
-        els['bookbar-change'].classList.contains('hidden') &&
-        !els['bookbar-close'].classList.contains('hidden'), 'change still offered');
+  check('with a vault open, changing book is still offered, and says it closes the vault',
+        !els['bookbar-change'].classList.contains('hidden') &&
+        els['bookbar-change'].textContent.includes('closes this vault') &&
+        !els['bookbar-close'].classList.contains('hidden'), els['bookbar-change'].textContent);
   check('the bar says the vault is what decides',
         els['bookbar-vault'].textContent.includes('Vault A') &&
         els['bookbar-vault'].textContent.includes('decides the book'),
@@ -629,16 +647,29 @@ function check(name, cond, got) {
 
   await els['bookbar-change'].onclick();
   await new Promise(r => setTimeout(r, 30));
-  check('asking to change book with a vault open explains the vault decides',
+  check('changing book closes the vault and goes straight to choosing another',
+        calls.includes('/api/books/switch') &&
+        !els['step-books'].classList.contains('hidden') &&
+        els['books-locked'].classList.contains('hidden') &&
+        els['books-list'].children.every(li => !li.children[0].disabled),
+        calls.slice(-4));
+
+  // Reaching the list another way with a vault still open: its card does the
+  // same in one press.
+  CURRENT_WS = WS_A_VAULT;
+  await ctx.refreshWorkspace();
+  await ctx.openBookPicker();
+  await new Promise(r => setTimeout(r, 30));
+  check('with a vault open, the list explains the vault decides',
         !els['books-locked'].classList.contains('hidden') &&
         els['books-locked-text'].textContent.includes('close the vault first'),
         els['books-locked-text'].textContent);
-
+  const switchesBefore = calls.filter(c => c === '/api/books/switch').length;
   await els['books-close-vault'].onclick();
   await new Promise(r => setTimeout(r, 30));
-  check('closing the vault from there frees the choice',
-        calls.includes('/api/vault/close') &&
-        els['books-locked'].classList.contains('hidden'), calls);
+  check('its button closes the vault and frees the choice',
+        calls.filter(c => c === '/api/books/switch').length === switchesBefore + 1 &&
+        els['books-locked'].classList.contains('hidden'), calls.slice(-4));
 
   // Another book: whatever was counted for the last one goes.
   await els['books-list'].children[els['books-list'].children.length - 1]
@@ -665,6 +696,105 @@ function check(name, cond, got) {
         els['link-discussion'].href);
   check('nothing in the page names a book of its own',
         !/confused4now|textbookproject2026-alt\/textbook\b/.test(js), 'constant found');
+
+  // --- the account ---------------------------------------------------------
+
+  const ACCOUNT = { signed_in: true, login: 'dept-coordinator-test', name: 'Dept Coordinator' };
+  const WS_A_READONLY = Object.assign({}, WS_A_VAULT, {
+    book: Object.assign({}, BOOK_A, { access: 'read' }), account: ACCOUNT });
+  CURRENT_WS = WS_A_READONLY;
+  await ctx.refreshWorkspace();
+  check('the bar names the signed-in account',
+        text(els['bookbar-account']).includes('dept-coordinator-test') &&
+        !els['bookbar-signout'].classList.contains('hidden') &&
+        !els['bookbar-switch-account'].classList.contains('hidden'),
+        text(els['bookbar-account']));
+  const offer = els['bookbar-book'].children.find(c => c.textContent === 'Use a different account');
+  check('where the account can only read the book, switching account is offered right there',
+        text(els['bookbar-book']).includes('can read this book but not change it') && !!offer,
+        text(els['bookbar-book']));
+
+  // A sign-out the Keychain would not honour is reported, not hidden.
+  signoutReply = { __refuse: 'The sign-in could not be taken out of this Mac\'s Keychain, so you are still signed in.' };
+  els['error-text'].textContent = '';
+  await els['bookbar-signout'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('a sign-out that did not clear the Keychain says the author is still signed in',
+        els['error-text'].textContent.includes('still signed in') && SIGNED_IN === true,
+        els['error-text'].textContent);
+
+  // On the import screen, before converting.
+  DRAFTS_STATUS = { available: false, why: 'no_access',
+    message: 'Your account (dept-coordinator-test) can\'t make changes to “Book A”.' };
+  CURRENT_WS = WS_A_VAULT;
+  await els['import-another'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('on the import screen, an account without push rights is offered another account before converting',
+        !els['import-account-actions'].classList.contains('hidden') &&
+        els['import-switch-account'].textContent === 'Use a different account',
+        els['import-switch-account'].textContent);
+
+  signoutReply = { signed_in: false, was: 'dept-coordinator-test' };
+  await els['import-switch-account'].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('switching account signs out as a switch, and goes to sign-in',
+        bodies['/api/console/signout'].switching === true &&
+        !els['step-console-signin'].classList.contains('hidden'),
+        bodies['/api/console/signout']);
+  check('the sign-in screen says which account was signed out, and how to pick another on GitHub',
+        !els['signin-switching'].classList.contains('hidden') &&
+        els['signin-switching-text'].textContent.includes('dept-coordinator-test') &&
+        els['signin-switching-text'].textContent.includes('Keychain'),
+        els['signin-switching-text'].textContent);
+
+  // Signing in as the other account brings the author back to the import.
+  signinReply = { signed_in: true, who: 'Other Author', login: 'other-author', same_account: false };
+  SIGNED_IN = true;
+  DRAFTS_STATUS = { available: true, why: 'ok',
+    message: 'Once it is converted you can send it to the drafts area of “Book A”.' };
+  await els['signin-start'].onclick();
+  await new Promise(r => setTimeout(r, 2200));
+  check('once signed in as the other account, the author is back on the import screen',
+        !els['step-import'].classList.contains('hidden') &&
+        els['import-account-actions'].classList.contains('hidden'),
+        steps.filter(x => !els[x].classList.contains('hidden')));
+
+  // GitHub gave back the same account: the author is told, not left guessing.
+  signoutReply = { signed_in: false, was: 'other-author' };
+  await els['bookbar-switch-account'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  signinReply = { signed_in: true, who: 'Other Author', login: 'other-author', same_account: true };
+  SIGNED_IN = true;
+  els['error-text'].textContent = '';
+  await els['signin-start'].onclick();
+  await new Promise(r => setTimeout(r, 2200));
+  check('if GitHub signs the same account in again, the author is told why',
+        els['error-text'].textContent.includes('other-author again') &&
+        els['error-text'].textContent.includes('browser'),
+        els['error-text'].textContent);
+
+  // Settings has the same two actions.
+  await els['open-settings'].onclick();
+  check('Settings names the account and offers to sign out or use another',
+        els['settings-account'].textContent.includes('author') &&
+        !els['settings-account-actions'].classList.contains('hidden'),
+        els['settings-account'].textContent);
+  signoutReply = { signed_in: false, was: 'author' };
+  await els['settings-signout'].onclick();
+  check('signing out from Settings says so there',
+        els['settings-account'].textContent === 'Not signed in.' &&
+        els['settings-account-actions'].classList.contains('hidden'),
+        els['settings-account'].textContent);
+  els['settings-close'].onclick();
+
+  // --- where a new chapter goes -------------------------------------------
+
+  IMPORT_READY = { ready: true, folder: '/va/chapters', folder_name: 'chapters', chapters_here: 3 };
+  await els['pick-docx'].onclick();
+  check('with a vault open, a Word import goes in the book’s chapters folder unless the author picks another',
+        els['folder-chosen'].textContent.startsWith('/va/chapters') &&
+        els['folder-chosen'].textContent.includes('3 chapters'),
+        els['folder-chosen'].textContent);
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

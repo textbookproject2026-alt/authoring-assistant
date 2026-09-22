@@ -81,6 +81,22 @@ def delete(account):
     return ok
 
 
+def forget(account, attempts=5):
+    """Remove every copy of a secret, and check it is gone.
+
+    The tool deletes one matching item per call, and a keychain can hold more
+    than one (an older copy in another keychain, say), so it is asked again
+    until nothing is left. Returns True only when the secret can no longer be
+    read back.
+    """
+    for _ in range(attempts):
+        if load(account) is None:
+            return True
+        if not delete(account):
+            break
+    return load(account) is None
+
+
 def hint(account):
     """The last four characters, so the author can tell which secret is saved
     without ever seeing it again."""

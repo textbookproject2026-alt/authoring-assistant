@@ -481,8 +481,23 @@ async function enterImport() {
     document.getElementById('install-message').textContent = '';
     return show('step-import-setup');
   }
+  // Until the author picks another, a chapter goes in the book's chapters
+  // folder, not wherever the chooser happens to open.
+  if (st.folder && (!W.folder || W.folder.folder !== st.folder)) {
+    W.folder = { folder: st.folder, folder_name: st.folder_name,
+                 chapters_here: st.chapters_here || 0 };
+  } else if (!st.folder) {
+    W.folder = null;
+  }
   renderImportStep();
   show('step-import');
+}
+
+function describeFolder(f) {
+  return f.folder + (f.chapters_here
+    ? `  —  ${f.chapters_here} chapter${f.chapters_here === 1 ? '' : 's'} already here`
+    : '  —  no chapters here yet') +
+    (f.at_top ? '. This is the top of your vault; chapters usually go in its “chapters” folder.' : '');
 }
 
 document.getElementById('import-setup-back').onclick = () => show('step-choose');
@@ -525,7 +540,7 @@ function renderImportStep() {
   document.getElementById('docx-chosen').textContent =
     W.docx ? W.docx.docx_name : 'Nothing chosen yet.';
   document.getElementById('folder-chosen').textContent =
-    W.folder ? W.folder.folder : 'Nothing chosen yet.';
+    W.folder ? describeFolder(W.folder) : 'Nothing chosen yet.';
   checkImportReady();
   refreshDraftsStatus();
 }
@@ -539,8 +554,33 @@ async function refreshDraftsStatus() {
     const r = await api('/api/import/drafts-status', {});
     p.textContent = r.message;
     p.className = r.available ? '' : 'quiet';
+    showAccountFix('import-account-actions', 'import-switch-account', r.why);
   } catch (e) { p.textContent = e.message; p.className = 'quiet bad'; }
 }
+
+/* When it is the account that stops a chapter going to drafts, the way to sign
+   in as another one is offered right there. */
+function showAccountFix(boxId, buttonId, why) {
+  const fix = why === 'no_access' || why === 'signed_out';
+  document.getElementById(boxId).classList.toggle('hidden', !fix);
+  document.getElementById(buttonId).textContent =
+    why === 'signed_out' ? 'Sign in' : 'Use a different account';
+}
+
+async function importAccountFix(from, why) {
+  if (why === 'signed_out') {
+    C.returnTo = from;
+    C.leaving = null;
+    return enterConsole();
+  }
+  await switchAccount(from);
+}
+document.getElementById('import-switch-account').onclick = async () => {
+  const r = await api('/api/import/drafts-status', {}).catch(() => ({}));
+  await importAccountFix('import', r.why);
+};
+document.getElementById('import-preview-switch-account').onclick = () =>
+  importAccountFix('import-preview', W.converted && W.converted.drafts && W.converted.drafts.why);
 
 function checkImportReady() {
   const name = document.getElementById('import-name').value.trim();
@@ -575,10 +615,7 @@ document.getElementById('choose-import-folder').onclick = async () => {
     await refreshWorkspace();
     W.folder = r;
     refreshDraftsStatus();
-    document.getElementById('folder-chosen').textContent =
-      r.folder + (r.chapters_here
-        ? `  —  ${r.chapters_here} chapter${r.chapters_here === 1 ? '' : 's'} already here`
-        : '  —  no chapters here yet');
+    document.getElementById('folder-chosen').textContent = describeFolder(r);
     checkImportReady();
   } catch (e) { fail(e.message); }
 };
@@ -659,6 +696,8 @@ function renderDraftsIntro(d) {
   const block = document.getElementById('import-drafts-block');
   block.classList.remove('hidden');
   document.getElementById('import-drafts-where').textContent = d ? d.message : '';
+  showAccountFix('import-preview-account-actions', 'import-preview-switch-account',
+                 d && d.why);
   document.getElementById('import-drafts-detail').textContent = '';
   document.getElementById('import-drafts-removed').innerHTML = '';
   document.getElementById('import-drafts-problem').textContent = '';
@@ -929,8 +968,26 @@ async function openSettings() {
   await loadEnv();
   try { C.status = await api('/api/console/status', {}); } catch (e) { /* shown as absent */ }
   renderSettings();
+  renderSettingsAccount();
   document.getElementById('settings').classList.remove('hidden');
 }
+
+function renderSettingsAccount() {
+  const st = C.status || {};
+  const p = document.getElementById('settings-account');
+  p.textContent = st.signed_in
+    ? ('Signed in to GitHub as ' + (st.login || 'an account not yet checked') + '.')
+    : 'Not signed in.';
+  document.getElementById('settings-account-actions').classList.toggle('hidden', !st.signed_in);
+}
+
+document.getElementById('settings-switch-account').onclick = () => switchAccount();
+document.getElementById('settings-signout').onclick = async () => {
+  if (!(await signOut(false))) return;
+  try { C.status = await api('/api/console/status', {}); } catch (e) { /* shown as absent */ }
+  renderSettingsAccount();
+  if (onConsoleScreen()) await enterConsole();
+};
 
 document.getElementById('open-settings').onclick = openSettings;
 document.getElementById('settings-close').onclick = () => {
@@ -1036,6 +1093,8 @@ window.addEventListener('pagehide', () => {
 
 const C = {
   status: null,
+  leaving: null,    // the account just signed out of to use another, or null
+  returnTo: null,   // where to go back to once signed in again
   data: null,
   suggestion: null,
   plan: null,
@@ -1074,6 +1133,10 @@ function renderWorkspace(ws) {
     bookEl.appendChild(el('span', 'bookbar-repo', ' · ' + ws.book.repo));
     if (ws.book.access === 'read' || ws.book.access === 'none') {
       bookEl.appendChild(el('span', 'bookbar-repo', ' · you can read this book but not change it'));
+      // The moment it matters is the moment to offer the way out.
+      const other = el('button', 'link inline', 'Use a different account');
+      other.onclick = () => switchAccount();
+      bookEl.appendChild(other);
     }
   } else {
     bookEl.textContent = 'No book chosen';
@@ -1098,9 +1161,13 @@ function renderWorkspace(ws) {
   regEl.textContent = regText;
   regEl.classList.toggle('hidden', !regText);
 
-  const change = document.getElementById('bookbar-change');
-  change.classList.toggle('hidden', !!ws.locked);
+  // Changing book is always offered. With a vault open it closes the vault,
+  // since the vault decides the book, and goes straight to choosing another.
+  document.getElementById('bookbar-change').textContent =
+    v ? 'Change book (closes this vault)' : 'Change book';
   document.getElementById('bookbar-close').classList.toggle('hidden', !v);
+
+  renderAccount(ws.account);
 
   // What was on screen belonged to the old book; never leave it showing.
   if (before !== bookSlug()) {
@@ -1110,6 +1177,31 @@ function renderWorkspace(ws) {
   ['console-book', 'sug-book', 'draft-book', 'publish-book'].forEach(id => {
     document.getElementById(id).textContent = ws.book ? ('For ' + ws.book.title) : '';
   });
+}
+
+/* Which GitHub account everything is done as. Shown in the bar at all times,
+   with the way to sign out or change it beside it. */
+function renderAccount(a) {
+  if (!a) return;
+  const acc = document.getElementById('bookbar-account');
+  acc.innerHTML = '';
+  if (a.signed_in && a.login) {
+    acc.appendChild(el('strong', '', a.login));
+    if (a.name && a.name !== a.login) acc.appendChild(el('span', 'bookbar-repo', ' · ' + a.name));
+  } else if (a.signed_in) {
+    acc.textContent = 'Signed in (checking which account…)';
+  } else {
+    acc.textContent = 'Not signed in';
+  }
+  document.getElementById('bookbar-signin').classList.toggle('hidden', !!a.signed_in);
+  document.getElementById('bookbar-switch-account').classList.toggle('hidden', !a.signed_in);
+  document.getElementById('bookbar-signout').classList.toggle('hidden', !a.signed_in);
+}
+
+// Asks who the sign-in belongs to, which needs the network, so the bar can
+// name the account rather than just say someone is signed in.
+async function refreshAccount() {
+  try { renderWorkspace(await api('/api/account', {})); } catch (e) { /* the bar keeps its last state */ }
 }
 
 async function refreshWorkspace() {
@@ -1138,7 +1230,7 @@ async function openBookPicker() {
   if (WS.locked) {
     document.getElementById('books-locked-text').textContent = WS.book
       ? ('The vault you have open, “' + WS.vault.name + '”, is ' + WS.book.title +
-         ', so that is the book you are working on. To work on a different book, close the vault first.')
+         ', so that is the book you are working on. To work on a different book, close the vault first — the button below does that and lets you choose.')
       : (WS.vault.message + ' Close the vault to choose a book instead.');
   }
 
@@ -1169,6 +1261,8 @@ async function openBookPicker() {
     list.appendChild(el('li', 'none',
       'Your account can’t make changes to any registered book. The book’s maintainer can give you access.'));
   }
+  document.getElementById('books-other-account').classList.toggle(
+    'hidden', !(r.hidden || !r.books.length));
   if (r.hidden) {
     hidden.textContent = r.hidden === 1
       ? '1 other book isn’t shown, because your account can’t make changes to it.'
@@ -1183,7 +1277,7 @@ async function chooseBook(slug) {
   await loadConsole();
 }
 
-document.getElementById('bookbar-change').onclick = enterBookPicker;
+document.getElementById('bookbar-change').onclick = switchBook;
 document.getElementById('books-back').onclick = () => document.getElementById('go-chapters').click();
 
 async function closeVault() {
@@ -1191,10 +1285,19 @@ async function closeVault() {
   if (onConsoleScreen()) await enterConsole();
 }
 document.getElementById('bookbar-close').onclick = closeVault;
-document.getElementById('books-close-vault').onclick = async () => {
-  try { renderWorkspace(await api('/api/vault/close', {})); } catch (e) { return fail(e.message); }
-  await openBookPicker();
-};
+
+// Work on a different book. The open vault decides the book, so it is closed
+// first, and the author goes straight to choosing another.
+async function switchBook() {
+  if (WS.vault) {
+    try { renderWorkspace(await api('/api/books/switch', {})); } catch (e) { return fail(e.message); }
+    // An import on its way into the old vault was dropped with it.
+    W.folder = null; W.converted = null; W.saved = null; W.sent = null; W.drafts = null;
+  }
+  await enterBookPicker();
+}
+document.getElementById('books-close-vault').onclick = switchBook;
+document.getElementById('books-switch-account').onclick = () => switchAccount('books');
 
 // Choosing a book needs to know who is asking, so it goes through sign-in.
 async function enterBookPicker() {
@@ -1231,6 +1334,7 @@ async function enterConsole(opts) {
   if (!C.status.configured) return show('step-console-setup');
   if (!C.status.signed_in) {
     document.getElementById('signin-code-box').classList.add('hidden');
+    renderSwitching();
     return show('step-console-signin');
   }
   // No book yet, or the author asked to change it: choose one first. The
@@ -1246,7 +1350,15 @@ document.getElementById('go-chapters').onclick = () => {
   show(S.sessionId ? 'step-choose' : 'step-choose');
 };
 document.getElementById('setup-back').onclick = () => document.getElementById('go-chapters').click();
-document.getElementById('signin-back').onclick = () => document.getElementById('go-chapters').click();
+document.getElementById('signin-back').onclick = () => {
+  stopPolling();
+  document.getElementById('signin-start').disabled = false;
+  const back = C.returnTo;
+  C.returnTo = null; C.leaving = null;
+  if (back === 'import') { place('chapters'); renderImportStep(); return show('step-import'); }
+  if (back === 'import-preview' && W.converted) { place('chapters'); return show('step-import-preview'); }
+  document.getElementById('go-chapters').click();
+};
 document.getElementById('setup-open-settings').onclick = openSettings;
 
 /* --- signing in --- */
@@ -1279,7 +1391,17 @@ function pollSignin(wait) {
       if (r.waiting) return pollSignin(r.wait || 5);
       document.getElementById('signin-start').disabled = false;
       C.status = null;
-      await enterConsole();
+      const leaving = C.leaving;
+      C.leaving = null;
+      renderSwitching();
+      await refreshAccount();
+      if (r.same_account) {
+        fail('GitHub signed you in as ' + r.login + ' again, the account you ' +
+          'signed out of. It uses whichever account your web browser is signed ' +
+          'in to. To use another one, sign out of GitHub in your browser, then ' +
+          'press “Use a different account” again.');
+      }
+      await afterSignin(leaving);
     } catch (e) {
       document.getElementById('signin-start').disabled = false;
       document.getElementById('signin-code-box').classList.add('hidden');
@@ -1288,13 +1410,74 @@ function pollSignin(wait) {
   }, Math.max(2, wait) * 1000);
 }
 
-document.getElementById('console-signout').onclick = async () => {
-  try { await api('/api/console/signout', {}); } catch (e) { /* signing out always succeeds locally */ }
+/* Signing out takes the sign-in out of the Keychain; the server reads it back
+   to make sure. If it could not, the author is told they are still signed in,
+   never shown a signed-out screen over a token that is still there. */
+async function signOut(switching) {
+  let r;
+  try {
+    r = await api('/api/console/signout', { switching: !!switching });
+  } catch (e) {
+    await refreshWorkspace();
+    fail(e.message);
+    return false;
+  }
   C.status = null; C.data = null;
   setWaitingCount(0);
-  await refreshWorkspace();
+  renderWorkspace(r.workspace);
+  C.leaving = switching ? (r.was || '') : null;
+  return true;
+}
+
+// `from` says where to come back to once signed in as the other account.
+async function switchAccount(from) {
+  document.getElementById('settings').classList.add('hidden');
+  if (!(await signOut(true))) return;
+  C.returnTo = from || null;
   await enterConsole();
+}
+
+function renderSwitching() {
+  const box = document.getElementById('signin-switching');
+  box.classList.toggle('hidden', C.leaving === null || C.leaving === undefined);
+  document.getElementById('signin-switching-text').textContent = C.leaving
+    ? ('You have signed out of ' + C.leaving + '. Its sign-in has been taken out of this Mac\'s Keychain.')
+    : 'The old sign-in has been taken out of this Mac\'s Keychain.';
+}
+
+async function afterSignin(leaving) {
+  const back = C.returnTo;
+  C.returnTo = null;
+  if (back === 'import') {
+    place('chapters');
+    renderImportStep();
+    return show('step-import');
+  }
+  if (back === 'import-preview' && W.converted) {
+    place('chapters');
+    try {
+      const d = await api('/api/import/drafts-status', {});
+      W.converted.drafts = d;
+    } catch (e) { /* said on the screen below */ }
+    renderDraftsIntro(W.converted.drafts);
+    document.getElementById('import-confirm').checked = false;
+    updateImportButtons();
+    return show('step-import-preview');
+  }
+  if (back === 'books') return enterBookPicker();
+  await enterConsole();
+}
+
+document.getElementById('console-signout').onclick = async () => {
+  if (await signOut(false)) await enterConsole();
 };
+document.getElementById('bookbar-signout').onclick = async () => {
+  if (await signOut(false) && onConsoleScreen()) await enterConsole();
+};
+document.getElementById('bookbar-switch-account').onclick = () => switchAccount();
+document.getElementById('bookbar-signin').onclick = () => enterConsole();
+document.getElementById('signin-github-signout').onclick = () =>
+  window.open('https://github.com/logout', '_blank', 'noopener');
 
 /* --- the list --- */
 
@@ -1757,6 +1940,7 @@ document.getElementById('welcome-settings').onclick = async () => {
   startHeartbeat();
   await loadEnv();
   await refreshWorkspace();
+  refreshAccount();
   refreshDeepseekOption();
   show(ENV.seen_welcome ? 'step-choose' : 'step-welcome');
 })();

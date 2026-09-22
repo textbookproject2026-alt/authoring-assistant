@@ -2264,6 +2264,170 @@ for _d in (_wa, _wb):
 _on_book(_BOOK)
 
 
+# --- signing out, and signing in as someone else ---
+
+import importlib.util as _ilu  # noqa: E402
+
+# The real keychain code, against a pretend `security` tool: the stubs above
+# replace it for every other check, so this copy is loaded on its own.
+_kspec = _ilu.spec_from_file_location("_real_keychain", _keychain.__file__)
+_realkc = _ilu.module_from_spec(_kspec)
+_kspec.loader.exec_module(_realkc)
+
+
+def _pretend_security(copies, deletable=True):
+    """`copies` tokens stored; each delete removes one, as the real tool does."""
+    held = ["tok"] * copies
+
+    def run(args, stdin_text=None):
+        if args[0] == "find-generic-password":
+            return (True, held[0] + "\n") if held else (False, "")
+        if args[0] == "delete-generic-password":
+            if held and deletable:
+                held.pop()
+                return True, ""
+            return False, ""
+        raise AssertionError(args)
+    return run, held
+
+
+_realkc._run, _held = _pretend_security(2)
+check("signing out removes every copy of the token, not just the first",
+      _realkc.forget(_realkc.ACCOUNT_GITHUB) is True and _held == [], _held)
+_realkc._run, _held = _pretend_security(1, deletable=False)
+check("a token the Keychain won't give up is reported as still there",
+      _realkc.forget(_realkc.ACCOUNT_GITHUB) is False and _held == ["tok"])
+
+_on_book(_BOOK)
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "old-token"
+_server.CONSOLE["login"] = "old-login"
+_so = _server.r_console_signout(None, {})
+check("signing out takes the token out of the Keychain",
+      _keychain.ACCOUNT_GITHUB not in _FAKE_KEYCHAIN and _server._token() is None,
+      _FAKE_KEYCHAIN)
+check("and the page is told nobody is signed in",
+      _so["workspace"]["account"] == {"signed_in": False, "login": None,
+                                      "name": None}, _so["workspace"]["account"])
+
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "stuck-token"
+_server.CONSOLE["login"] = "old-login"
+_real_delete = _keychain.delete
+_keychain.delete = lambda account: False
+_msg = _refused(lambda: _server.r_console_signout(None, {}))
+_keychain.delete = _real_delete
+check("a sign-out the Keychain refused says so, rather than looking signed out",
+      "still signed in" in (_msg or "") and
+      _FAKE_KEYCHAIN.get(_keychain.ACCOUNT_GITHUB) == "stuck-token", _msg)
+
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "old-token"
+_server.CONSOLE.update(login="old-login", who="Old", access={"book-a": "read"})
+_so = _server.r_console_signout(None, {"switching": True})
+check("switching account signs the old one out and remembers who it was",
+      _so["was"] == "old-login" and _server.CONSOLE["leaving"] == "old-login"
+      and _server.CONSOLE["access"] == {} and _server._token() is None)
+
+_real_poll, _real_whoami = _github.poll_signin, _github.whoami
+
+
+def _sign_in_as(login):
+    _server.CONSOLE["signin"] = {"device_code": "d", "interval": 2,
+                                 "deadline": time.time() + 60}
+    _github.poll_signin = lambda client, code: {"token": "tok-" + login}
+    _github.whoami = lambda token: {"login": login, "name": login.title()}
+    try:
+        return _server.r_console_signin_poll(None, {})
+    finally:
+        _github.poll_signin, _github.whoami = _real_poll, _real_whoami
+
+
+_si = _sign_in_as("Old-Login")
+check("if GitHub signs the same account back in, the page is told",
+      _si["same_account"] is True and _si["login"] == "Old-Login", _si)
+_server.r_console_signout(None, {"switching": True})
+_si = _sign_in_as("other-author")
+check("signing in as a different account keeps the new one, and says so",
+      _si["same_account"] is False and
+      _FAKE_KEYCHAIN.get(_keychain.ACCOUNT_GITHUB) == "tok-other-author" and
+      _server.CONSOLE["leaving"] is None, _si)
+_acc = _server.r_account(None, {})["account"]
+check("the bar is told the new account's name",
+      _acc == {"signed_in": True, "login": "other-author",
+               "name": "Other-Author"}, _acc)
+_server.CONSOLE.update(login=None, who=None)
+_acc = _with_service(_Books(_PERMS), lambda: _server.r_account(None, {}))["account"]
+check("when the name isn't known yet, it is asked for",
+      _acc["login"] == "author", _acc)
+_so = _server.r_console_signout(None, {})
+check("a plain sign-out doesn't pretend the author is switching",
+      _server.CONSOLE["leaving"] is None)
+
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "a-token"
+_on_book(_BOOK)
+_server.CONSOLE["access"]["book-a"] = "read"
+_wa, _wch = _word_vault("book-a", "git@github.com:example-org/book-a.git")
+_server._open_vault(_wa)
+_server.IMPORT.update(folder=None, result=None, docx=None)
+_st = _server.r_import_drafts_status(None, {})
+check("on the import screen, a read-only account is said to be the reason",
+      _st["why"] == "no_access" and "different account" in _st["message"], _st)
+_FAKE_KEYCHAIN.pop(_keychain.ACCOUNT_GITHUB, None)
+check("and not being signed in is told apart from it",
+      _server.r_import_drafts_status(None, {})["why"] == "signed_out")
+_FAKE_KEYCHAIN[_keychain.ACCOUNT_GITHUB] = "a-token"
+_server.CONSOLE["access"]["book-a"] = "write"
+
+# --- where a Word import goes, until the author says otherwise ---
+
+_server.IMPORT.update(folder=None, result=None, docx=None)
+_ist = _server.r_import_status(None, {})
+check("with a vault open, a Word import goes in the book's chapters folder",
+      _ist["folder"] == os.path.join(_wa, "chapters") and
+      _server.IMPORT["folder"] == os.path.join(_wa, "chapters"), _ist["folder"])
+_starts = []
+
+
+def _chooser(prompt, start):
+    _starts.append(start)
+    return _wa, None
+
+
+_server.picker.choose_folder = _chooser
+_server.IMPORT["folder"] = None
+_pf = _server.r_import_pick_folder(None, {})
+_server.picker.choose_folder = _no_chooser
+check("the folder chooser opens in the chapters folder, not the top of the vault",
+      _starts == [os.path.join(_wa, "chapters")], _starts)
+check("choosing the top of the vault anyway is pointed out",
+      _pf["at_top"] is True, _pf)
+_server.IMPORT["folder"] = os.path.join(_wa, "chapters")
+check("a folder the author picked is kept, not put back to the default",
+      _server.r_import_status(None, {})["folder"] == os.path.join(_wa, "chapters")
+      and (_server.IMPORT.update(folder=_wa) or
+           _server.r_import_status(None, {})["folder"] == _wa))
+_server._open_vault(_vplain)
+_server.IMPORT["folder"] = None
+check("a vault with no chapters folder of the import kind gets no default",
+      _server.r_import_status(None, {})["folder"] is None)
+
+# --- changing book ---
+
+_server._open_vault(_wa)
+_server.CONSOLE["access"].update({"book-a": "write", "book-b": "write"})
+_res = _converted(_wch, _wa, "Moving.md", {})
+_ws = _server.r_books_switch(None, {})
+check("changing book closes the vault that decided it",
+      _ws["vault"] is None and _ws["locked"] is False, _ws)
+check("and drops the Word import that was going into it",
+      _server.IMPORT["folder"] is None and _server.IMPORT["result"] is None
+      and not os.path.isdir(_res["stage"]))
+check("another book can then be chosen",
+      _server.r_books_choose(None, {"slug": "book-b"})["book"]["slug"] == "book-b")
+check("changing book with no vault open changes nothing",
+      _server.r_books_switch(None, {})["book"]["slug"] == "book-b")
+shutil.rmtree(_wa, ignore_errors=True)
+_on_book(_BOOK)
+
+
 # --- secrets ---
 
 with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
