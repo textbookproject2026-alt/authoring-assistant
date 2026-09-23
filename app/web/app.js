@@ -1730,16 +1730,27 @@ async function openSuggestion(s) {
 
   const box = document.getElementById('sug-plan');
   box.innerHTML = '';
-  box.appendChild(el('p', 'quiet', 'Looking at your chapter…'));
+  box.appendChild(el('p', 'quiet', 'Looking at your chapter… this can take a few seconds.'));
 
+  // Accept answers the plan on screen, so there is nothing to accept until
+  // one is. Pressed while the plan was on its way, it would tell the reader
+  // the author will do by hand what the tool is about to offer to do.
+  const accept = document.getElementById('sug-accept');
+  accept.disabled = true;
+  let plan;
   try {
-    C.plan = await bookApi('/api/console/plan', { number: s.number });
+    plan = await bookApi('/api/console/plan', { number: s.number });
   } catch (e) {
+    if (C.suggestion !== s) return;
     box.innerHTML = '';
     box.appendChild(el('p', 'notice bad', e.message));
     return;
   }
+  // The author may have gone on to another suggestion meanwhile.
+  if (C.suggestion !== s) return;
+  C.plan = plan;
   renderPlan();
+  accept.disabled = false;
 }
 
 function renderPlan() {
@@ -1811,7 +1822,7 @@ document.getElementById('sug-browser').onclick = () => {
 
 document.getElementById('sug-accept').onclick = async () => {
   const s = C.suggestion;
-  if (!s) return;
+  if (!s || !C.plan) return;
   const cb = document.getElementById('sug-apply');
   const applyIt = !!(cb && cb.checked && C.plan && C.plan.can_apply);
   const vcb = document.getElementById('sug-apply-vault');
@@ -1821,7 +1832,7 @@ document.getElementById('sug-accept').onclick = async () => {
   try {
     const r = await bookApi('/api/console/accept', {
       number: s.number, apply: applyIt, apply_vault: applyVault,
-      head: C.plan ? C.plan.head : null,
+      head: C.plan.head, plan_id: C.plan.plan_id,
     });
     if (r.moved) {
       // Nothing was changed or sent; here is the change as it would be now.

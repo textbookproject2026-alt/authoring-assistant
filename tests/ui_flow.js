@@ -130,11 +130,12 @@ let sendReplies = [];
 let commitReplies = [];
 let acceptReplies = [];
 let planReply = null;       // in place of PLAN, when set
+let planGate = null;        // while set, the plan is held back until it settles
 let lastHeaders = null;
 let wrongBuild = null;      // how an app of another version answers, when set
 const PLAN = {
   can_apply: true, reason: '', line_no: 3, before: 'The the words are here.',
-  after: 'The words are here.', head: 'h1', branch: 'drafts',
+  after: 'The words are here.', head: 'h1', branch: 'drafts', plan_id: 'p1',
   vault: { name: 'Vault A', can_apply: true, reason: '', suggested: true },
 };
 // Signing out and in again. The fake server refuses a sign-out when told to,
@@ -155,6 +156,7 @@ const fetch = async (route, opts) => {
   }
   const body = JSON.parse(opts.body || '{}');
   bodies[route] = body;
+  if (route === '/api/console/plan' && planGate) await planGate;
   if (route === '/api/books/choose') CURRENT_WS = body.slug === 'book-b' ? WS_B : WS_A;
   if (route === '/api/vault/close' || route === '/api/books/switch') CURRENT_WS = WS_A;
   const reply = {
@@ -914,13 +916,14 @@ function check(name, cond, got) {
 
   acceptReplies = [{ moved: true,
     message: 'Nothing was changed, and the suggestion is still open.',
-    plan: Object.assign({}, PLAN, { head: 'h2' }) }];
+    plan: Object.assign({}, PLAN, { head: 'h2', plan_id: 'p2' }) }];
   els['error-text'].textContent = '';
   await els['sug-accept'].onclick();
   check('accepting sends both ticks and the drafts the plan was read at',
         bodies['/api/console/accept'].apply === true &&
         bodies['/api/console/accept'].apply_vault === true &&
-        bodies['/api/console/accept'].head === 'h1', bodies['/api/console/accept']);
+        bodies['/api/console/accept'].head === 'h1' &&
+        bodies['/api/console/accept'].plan_id === 'p1', bodies['/api/console/accept']);
   check('if drafts moved, the author is told nothing changed and shown it again',
         els['error-text'].textContent.includes('still open') &&
         !els['step-suggestion'].classList.contains('hidden'), els['error-text'].textContent);
@@ -933,8 +936,62 @@ function check(name, cond, got) {
   await els['sug-accept'].onclick();
   check('accepting again goes on the fresh offer',
         bodies['/api/console/accept'].head === 'h2' &&
+        bodies['/api/console/accept'].plan_id === 'p2' &&
         !els['step-console-done'].classList.contains('hidden'),
         bodies['/api/console/accept']);
+
+  // --- Accept waits for the plan -------------------------------------------
+  //
+  // Live issue #6: the plan took twelve seconds to come back, Accept was
+  // pressed meanwhile, and the reader was told the change would be made by
+  // hand though the tool could make it.
+
+  const issue6 = { number: 6, who: 'Alec Gordon', when: '2026-09-23T13:53:21Z',
+    page: 'chapter-2', suggestion: '"seperately" should be "separately"', reasoning: '' };
+  let release;
+  planGate = new Promise(r => { release = r; });
+  planReply = Object.assign({}, PLAN, { line_no: 13, vault: null, plan_id: 'p6',
+    before: "seperately in each book's repository.",
+    after: "separately in each book's repository." });
+  delete bodies['/api/console/accept'];
+  const opening = ctx.openSuggestion(issue6);
+  await new Promise(r => setTimeout(r, 0));
+  check('while the plan is on its way, Accept is not available',
+        els['sug-accept'].disabled && allText(els['sug-plan']).includes('Looking at your chapter'),
+        allText(els['sug-plan']));
+  await els['sug-accept'].onclick();
+  check('and pressing it anyway sends nothing and closes nothing',
+        bodies['/api/console/accept'] === undefined, bodies['/api/console/accept']);
+
+  // Left for another suggestion before the plan came: the late plan is not
+  // put under the other one.
+  const other = { number: 62, who: 'B', when: '2026-09-23T00:00:00Z',
+    page: 'chapter-1', suggestion: '"The the words" should be "The words"', reasoning: '' };
+  planGate = null;
+  const planned6 = planReply;
+  planReply = Object.assign({}, PLAN, { vault: null, plan_id: 'p62' });
+  await ctx.openSuggestion(other);
+  planReply = planned6;
+  release();
+  await opening;
+  check('a plan arriving after the author moved on is not shown for the other suggestion',
+        allText(els['sug-plan']).includes('line 3') &&
+        !allText(els['sug-plan']).includes('line 13') && !els['sug-accept'].disabled,
+        allText(els['sug-plan']));
+
+  await ctx.openSuggestion(issue6);
+  els['sug-apply'] = find(els['sug-plan'], 'sug-apply');
+  els['sug-apply-vault'] = null;
+  check('once the plan is shown, Accept is available and the change is offered ticked',
+        !els['sug-accept'].disabled && els['sug-apply'] && els['sug-apply'].checked &&
+        allText(els['sug-plan']).includes('line 13'), allText(els['sug-plan']));
+  acceptReplies = [{ done: true, url: 'https://example.invalid/c/6', steps: [
+    'Line 13 was changed in the drafts area, as one change of its own.'] }];
+  await els['sug-accept'].onclick();
+  check('and accepting asks for the change, answering that plan',
+        bodies['/api/console/accept'].apply === true &&
+        bodies['/api/console/accept'].plan_id === 'p6', bodies['/api/console/accept']);
+  planReply = null;
 
   // --- a suggestion the tool can't make: the reader is not told it was ------
 

@@ -1588,8 +1588,11 @@ def _plan_on_drafts(token, book, suggestion):
     elif snap is not None and not drafts.safe_path(path):
         plan["reason"] = ("This suggestion names a page outside the book, so "
                           "the tool will not touch it.")
+    # Named afresh every time, so that an acceptance can show which plan the
+    # author was looking at, and that they were looking at one at all.
     plan.update(book=book.slug, path=path, snap=snap,
-                head=snap["head"] if snap else None)
+                head=snap["head"] if snap else None,
+                id=secrets.token_urlsafe(12))
     return plan
 
 
@@ -1598,6 +1601,7 @@ def _shown_plan(book, plan):
     vault = plan.get("vault_plan")
     ident = WORKSPACE["vault"]
     return {
+        "plan_id": plan["id"],
         "can_apply": plan["can_apply"],
         "reason": plan["reason"],
         "line_no": plan["line_no"],
@@ -1658,8 +1662,12 @@ def r_console_accept(handler, data):
     steps = []
     sent = None
 
+    # Every acceptance answers a plan the page was shown, even one that
+    # changes nothing. Without that, an Accept pressed while the plan was
+    # still on its way arrives as "no change" and the reader is told the
+    # author will do by hand what the tool could have done.
     plan = CONSOLE["plans"].get((book.slug, str(number)))
-    if (apply_it or apply_vault) and not plan:
+    if not plan or not data.get("plan_id") or data["plan_id"] != plan.get("id"):
         raise KeyError("Please look at the change again before accepting it.")
     vault_plan = plan.get("vault_plan") if plan else None
     if apply_vault:
