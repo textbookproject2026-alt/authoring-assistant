@@ -47,6 +47,38 @@ def bundle_version():
     return "development"
 
 
+def build_id():
+    """Which copy of the app the files on disk are: the version, and a
+    fingerprint of the code and the page.
+
+    The version alone isn't enough, because every build is stamped 1.0.0 unless
+    it is told otherwise. A running copy reads this once, as it starts; the
+    page is stamped with it when it is served, from the files as they are then.
+    If a newer build has replaced the files under a copy still running, the two
+    differ, and the page says so instead of asking for something the running
+    copy doesn't know about.
+    """
+    import hashlib
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    digest = hashlib.sha256()
+    found = []
+    for folder, dirs, files in os.walk(here):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for name in files:
+            if name.endswith((".py", ".js", ".html", ".css")):
+                found.append(os.path.join(folder, name))
+    for full in sorted(found):
+        digest.update(os.path.relpath(full, here).encode("utf-8") + b"\0")
+        try:
+            with open(full, "rb") as fh:
+                digest.update(fh.read())
+        except OSError:
+            continue
+        digest.update(b"\0")
+    return f"{bundle_version()}+{digest.hexdigest()[:12]}"
+
+
 def read_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as fh:

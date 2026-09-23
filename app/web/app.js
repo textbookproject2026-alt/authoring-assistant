@@ -2,6 +2,13 @@
    author has seen the finished file and said yes. */
 
 const TOKEN = document.body.dataset.token;
+// Which copy of the app this page is, stamped when it was served. The copy
+// running in the background refuses anything from a page of another version,
+// and an older copy that predates the stamp leaves it unfilled.
+const BUILD = document.body.dataset.build;
+const STALE = 'This window and the part of the app running in the background ' +
+  'are from different versions, so nothing was done. Please quit and reopen the app.';
+let staleSeen = BUILD === '__BUILD__';
 
 const S = {
   sessionId: null,
@@ -24,12 +31,19 @@ const S = {
 async function api(route, body) {
   const res = await fetch(route, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-AA-Token': TOKEN },
+    headers: { 'Content-Type': 'application/json', 'X-AA-Token': TOKEN,
+               'X-AA-Build': BUILD || '' },
     body: JSON.stringify(body || {}),
   });
   let data;
   try { data = await res.json(); } catch (e) {
     throw new Error('The tool stopped responding. Please close this tab and start it again.');
+  }
+  // An older copy that predates the version check answers what it has never
+  // heard of this way, and nothing else would.
+  if (data.stale || (res.status === 404 && data.error === 'Unknown request.')) {
+    staleSeen = true;
+    throw new Error(STALE);
   }
   if (!res.ok || data.error) throw new Error(data.error || 'Something went wrong.');
   return data;
@@ -1784,7 +1798,8 @@ function renderPlan() {
     card.appendChild(vaultTick);
   } else {
     card.appendChild(el('p', 'quiet',
-      'Accepting sends a thank-you and clears it from this list. Make the change yourself under Chapters.'));
+      'Accepting thanks them, tells them you will make the change by hand, and clears it ' +
+      'from this list. Nothing in the chapter is changed — make the change yourself under Chapters.'));
   }
   box.appendChild(card);
 }
@@ -2044,4 +2059,5 @@ document.getElementById('welcome-settings').onclick = async () => {
   refreshAccount();
   refreshDeepseekOption();
   show(ENV.seen_welcome ? 'step-choose' : 'step-welcome');
+  if (staleSeen) fail(STALE);
 })();

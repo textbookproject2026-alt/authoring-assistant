@@ -41,6 +41,20 @@ CLOSING_DELAY = 12.0              # after a goodbye, in case it is just a reload
 # because a closing browser tab cannot set headers.
 QUERY_TOKEN_ROUTES = {"/api/ping", "/api/bye", "/api/alive"}
 
+# Which copy of the app this process is, read once as it starts: the code it is
+# running is the code that was on disk then. The page is stamped with the files
+# as they are when it is served and sends that stamp back with every request. A
+# newer build copied over a copy that is still running leaves the two apart, and
+# without this the only sign was an "Unknown request." for whatever the older
+# copy had never heard of.
+BUILD = config.build_id()
+STALE = ("This window and the part of the app running in the background are "
+         "from different versions, so nothing was done. Please quit and reopen "
+         "the app.")
+# What a page from another version may still ask: to keep the old copy company
+# until it is closed, and to quit it.
+ANY_BUILD_ROUTES = QUERY_TOKEN_ROUTES | {"/api/quit"}
+
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -140,12 +154,16 @@ class Handler(BaseHTTPRequestHandler):
             data = fh.read()
         if ext == ".html":
             data = data.replace(b"__TOKEN__", TOKEN.encode())
+            data = data.replace(b"__BUILD__", config.build_id().encode())
         self._send(200, data, CONTENT_TYPES.get(ext, "application/octet-stream"))
 
     def do_POST(self):
         route = self.path.split("?")[0]
         if not self._authorised(allow_query=route in QUERY_TOKEN_ROUTES):
             return self._send(403, {"error": "Not allowed."})
+        if route not in ANY_BUILD_ROUTES and \
+                self.headers.get("X-AA-Build") != BUILD:
+            return self._send(409, {"error": STALE, "stale": True})
         try:
             handler = ROUTES.get(route)
             if not handler:
@@ -180,7 +198,7 @@ def r_env(handler, data):
         "deepseek_hint": llm.key_hint(),
         "obsidian_running": picker.obsidian_running(),
         "python": ".".join(str(x) for x in sys.version_info[:3]),
-        "version": config.bundle_version(),
+        "version": BUILD.split("+")[0],
         "seen_welcome": config.seen_welcome(),
         "support_dir": config.SUPPORT_DIR,
         "key_store": "this Mac's Keychain",
@@ -1682,33 +1700,61 @@ def r_console_accept(handler, data):
                 " The suggestion is still open.")
         steps.append(message.replace("was updated", "was updated in your vault"))
 
-    changed = bool(sent or apply_vault)
-    thanks = console.thanks_with_change(sent.get("url")) \
-        if sent and sent.get("url") else console.THANKS
-    replied = github.comment(token, book, number, thanks)
-    if isinstance(replied, github.Problem):
-        raise RuntimeError(
-            (("The chapter was updated. " if changed else "") +
-             "The thank-you could not be sent: " + replied.message)
-        )
-    steps.append("A thank-you was sent, with a link to the change."
-                 if sent else "A thank-you was sent.")
-
-    github.drop_label(token, book, number, console.NEEDS_TRIAGE)
-
-    closed = github.close_issue(token, book, number)
-    if isinstance(closed, github.Problem):
-        raise RuntimeError(
-            (("The chapter was updated and the thank-you was sent, but the "
-              "suggestion could not be marked as dealt with: ") + closed.message)
-        )
+    commit_url = ""
+    if sent:
+        commit_url = sent.get("url") or github.commit_page(book, sent.get("sha"))
+    reply = console.reply_on_accept(commit_url, vault_changed=apply_vault)
+    done = ("The chapter was changed in the drafts area. " if sent else
+            "The chapter was changed in your vault. " if apply_vault else "")
+    failed, problem = _reply_and_close(token, book, number, reply, commit_url)
+    if failed == "reply":
+        raise RuntimeError(done + "The thank-you could not be sent: " +
+                           problem.message + " The suggestion is still open.")
+    if sent:
+        steps.append("A thank-you was sent, with a link to the change.")
+    elif apply_vault:
+        steps.append("A thank-you was sent, saying the change was made in your "
+                     "copy of the book and reaches readers when it is next "
+                     "published.")
+    else:
+        steps.append("A thank-you was sent, saying you will make the change by "
+                     "hand. The chapter itself was not changed — make the "
+                     "change under Chapters.")
+    if failed == "close":
+        raise RuntimeError(done + "The thank-you was sent, but the suggestion "
+                           "could not be marked as dealt with: " +
+                           problem.message)
     steps.append("The suggestion was marked as dealt with.")
     CONSOLE["plans"].pop((book.slug, str(number)), None)
     out = {"done": True, "steps": steps}
     if sent:
-        out.update(sha=sent["sha"], url=sent.get("url"),
-                   branch=book.drafts_branch)
+        out.update(sha=sent["sha"], url=commit_url, branch=book.drafts_branch)
     return out
+
+
+def _reply_and_close(token, book, number, reply, commit_url=""):
+    """Answer a suggestion and close it: the only way the console closes one.
+
+    The rule it holds every reply to: the reader is told the chapter changed
+    only when a commit holds the change, and the reply links that commit. A
+    reply that says otherwise is not sent, and the suggestion stays open.
+
+    Returns (None, None), or ("reply" | "close", the problem) for the step
+    that failed. A failed reply leaves the suggestion open.
+    """
+    if console.claims_change(reply) and not (commit_url and commit_url in reply):
+        raise RuntimeError(
+            "Nothing was sent: the reply would have told the reader the chapter "
+            "was changed, but there is no change to link to. The suggestion is "
+            "still open.")
+    replied = github.comment(token, book, number, reply)
+    if isinstance(replied, github.Problem):
+        return "reply", replied
+    github.drop_label(token, book, number, console.NEEDS_TRIAGE)
+    closed = github.close_issue(token, book, number)
+    if isinstance(closed, github.Problem):
+        return "close", closed
+    return None, None
 
 
 def r_console_decline(handler, data):
@@ -1719,17 +1765,13 @@ def r_console_decline(handler, data):
     _require_write(book)
     number = data.get("number")
 
-    replied = github.comment(token, book, number, console.DECLINED)
-    if isinstance(replied, github.Problem):
-        raise RuntimeError("The reply could not be sent: " + replied.message)
-
-    github.drop_label(token, book, number, console.NEEDS_TRIAGE)
-
-    closed = github.close_issue(token, book, number)
-    if isinstance(closed, github.Problem):
+    failed, problem = _reply_and_close(token, book, number, console.DECLINED)
+    if failed == "reply":
+        raise RuntimeError("The reply could not be sent: " + problem.message)
+    if failed == "close":
         raise RuntimeError(
             "The reply was sent, but the suggestion could not be marked as "
-            "dealt with: " + closed.message
+            "dealt with: " + problem.message
         )
     return {"done": True, "steps": ["A polite reply was sent.",
                                     "The suggestion was closed."]}

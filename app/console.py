@@ -25,19 +25,58 @@ from .mdmap import DocMap
 
 NEEDS_TRIAGE = "needs-triage"
 
-THANKS = (
-    "Thank you for this — it has been taken on board and the chapter has been "
-    "updated.\n\n_Replied from the author's console._"
-)
-
+# --- what the reader is told --------------------------------------------------
+#
+# One rule holds for every reply that closes a suggestion: it says the chapter
+# was changed only when a commit holds the change, and then it links that
+# commit. reply_on_accept is the only wording of an acceptance, and the server
+# checks every closing reply with claims_change before anything is sent.
 
 def thanks_with_change(url):
     """The thank-you when the tool made the change in the drafts area."""
+    if not url:
+        raise ValueError("A reply saying the chapter changed must link the change.")
     return (
         "Thank you for this — it has been taken on board, and the chapter has "
         f"been changed in the drafts: {url}\n\nIt reaches readers the next "
         "time the book goes live.\n\n_Replied from the author's console._"
     )
+
+
+# Made only in the author's own folder: nothing was committed, so nothing is
+# claimed about the chapter, and there is nothing to link.
+IN_VAULT = (
+    "Thank you for this — it has been taken on board, and the change has been "
+    "made in the author's own copy of the book. It reaches readers the next "
+    "time the book is published.\n\n_Replied from the author's console._"
+)
+
+# Accepted with nothing changed: the author is taking it on by hand.
+TAKEN_ON = (
+    "Thank you for this — it has been read and taken on board. The chapter "
+    "hasn't been changed yet: the author will make the change by hand.\n\n"
+    "_Replied from the author's console._"
+)
+
+
+def reply_on_accept(commit_url="", vault_changed=False):
+    """The thank-you for an accepted suggestion, saying only what happened."""
+    if commit_url:
+        return thanks_with_change(commit_url)
+    return IN_VAULT if vault_changed else TAKEN_ON
+
+
+_CLAIMS_CHANGE = re.compile(
+    r"\b(?:chapter|page|text)\b[^.]{0,40}?\b(?:has|have|was|were|is)\s+"
+    r"(?:now\s+)?(?:been\s+)?(?:updated|changed|fixed|corrected|amended)\b",
+    re.I)
+
+
+def claims_change(text):
+    """Whether a reply tells the reader the chapter itself was changed."""
+    return bool(_CLAIMS_CHANGE.search(text or ""))
+
+
 DECLINED = (
     "Thank you for taking the time to send this. After a look, the text is going "
     "to stay as it is for now — but the suggestion was read and appreciated, and "

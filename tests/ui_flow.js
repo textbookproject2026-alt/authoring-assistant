@@ -46,7 +46,7 @@ const warnbox = mkEl('warnbox');
 const previewH2 = mkEl('previewh2');
 
 const document = {
-  body: { dataset: { token: 'T' } },
+  body: { dataset: { token: 'T', build: '1.0.0+b1' } },
   getElementById: id => els[id] || (els[id] = mkEl(id)),
   createElement: tag => mkEl(tag),
   createTextNode: text => ({ nodeText: String(text) }),
@@ -129,6 +129,9 @@ let sendReplies = [];
 // The drafts area as the Chapters tools and the console see it (§8 step 2).
 let commitReplies = [];
 let acceptReplies = [];
+let planReply = null;       // in place of PLAN, when set
+let lastHeaders = null;
+let wrongBuild = null;      // how an app of another version answers, when set
 const PLAN = {
   can_apply: true, reason: '', line_no: 3, before: 'The the words are here.',
   after: 'The words are here.', head: 'h1', branch: 'drafts',
@@ -145,6 +148,11 @@ let IMPORT_READY = { ready: false, where: null, version: null, can_install: true
 const calls = [];
 const fetch = async (route, opts) => {
   calls.push(route);
+  lastHeaders = opts.headers || {};
+  if (wrongBuild && !route.startsWith('/api/ping')) {
+    const w = wrongBuild;
+    return { ok: false, status: w.status, json: async () => w.body };
+  }
   const body = JSON.parse(opts.body || '{}');
   bodies[route] = body;
   if (route === '/api/books/choose') CURRENT_WS = body.slug === 'book-b' ? WS_B : WS_A;
@@ -261,7 +269,7 @@ const fetch = async (route, opts) => {
       folder: '/Users/x/book-a (drafts, 2026-09-22)', files: 12, left_out: 0,
       repo: 'example-org/book-a', branch: 'drafts',
     },
-    '/api/console/plan': PLAN,
+    '/api/console/plan': planReply || PLAN,
     '/api/console/accept': route === '/api/console/accept' ? acceptReplies.shift() : null,
     '/api/preview': (() => { lastPreviewBody = body; return {
       counts: { references: 1, terms: 2, glossary: 1, expanded: 1 },
@@ -927,6 +935,47 @@ function check(name, cond, got) {
         bodies['/api/console/accept'].head === 'h2' &&
         !els['step-console-done'].classList.contains('hidden'),
         bodies['/api/console/accept']);
+
+  // --- a suggestion the tool can't make: the reader is not told it was ------
+
+  planReply = { can_apply: false, line_no: null, before: '', after: '', head: 'h3',
+    branch: 'staging', vault: null,
+    reason: 'This suggestion is written as a comment rather than as an exact ' +
+            'replacement, so the tool will not change the chapter itself.' };
+  await ctx.openSuggestion({ number: 61, who: 'A Reader', when: '2026-09-23T00:00:00Z',
+    page: 'chapter-1', suggestion: 'blaaaa', reasoning: '' });
+  const handText = allText(els['sug-plan']);
+  check('a suggestion for the author to make says the chapter will not be changed',
+        handText.includes('by hand') && handText.includes('Nothing in the chapter is changed') &&
+        !find(els['sug-plan'], 'sug-apply'), handText);
+  els['sug-apply'] = null; els['sug-apply-vault'] = null;
+  acceptReplies = [{ done: true, steps: [
+    'A thank-you was sent, saying you will make the change by hand. The chapter itself was not changed — make the change under Chapters.',
+    'The suggestion was marked as dealt with.'] }];
+  await els['sug-accept'].onclick();
+  check('accepting it asks for no change at all',
+        bodies['/api/console/accept'].apply === false &&
+        bodies['/api/console/accept'].apply_vault === false, bodies['/api/console/accept']);
+  planReply = null;
+
+  // --- the window and the app behind it are the same version -------------------
+
+  await ctx.api('/api/env', {});
+  check('every request carries the build the page was served from',
+        lastHeaders['X-AA-Build'] === '1.0.0+b1', lastHeaders);
+  wrongBuild = { status: 409, body: { stale: true,
+    error: 'This window and the part of the app running in the background are from ' +
+           'different versions, so nothing was done. Please quit and reopen the app.' } };
+  let versionSaid = '';
+  try { await ctx.api('/api/console/accept', {}); } catch (e) { versionSaid = e.message; }
+  check('a refusal for being another version tells the author to quit and reopen',
+        versionSaid.includes('Please quit and reopen the app.'), versionSaid);
+  wrongBuild = { status: 404, body: { error: 'Unknown request.' } };
+  versionSaid = '';
+  try { await ctx.api('/api/console/accept', {}); } catch (e) { versionSaid = e.message; }
+  check('so does an older app that has never heard of the request',
+        versionSaid.includes('Please quit and reopen the app.'), versionSaid);
+  wrongBuild = null;
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);
