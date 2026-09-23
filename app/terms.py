@@ -66,8 +66,10 @@ def _aliases_from_frontmatter(text):
 def discover_concept_pages(root, current_path, folder=None):
     """Find the notes whose titles we should look for in the chapter.
 
-    Returns (pages, source_description). If the vault has an obvious folder of
-    definitions we use just that, which keeps the suggestions relevant.
+    Returns (pages, source_description). The pages are the ones in the
+    vault's folder of definitions (the fullest folder with one of
+    CONCEPT_FOLDER_NAMES), or in `folder` if one is given. A vault with no
+    such folder has no concept pages, and ([], "") comes back.
     """
     root = os.path.abspath(root)
     search_root, described = root, None
@@ -85,9 +87,12 @@ def discover_concept_pages(root, current_path, folder=None):
                 count = len([f for f in filenames if f.endswith(".md")])
                 if count >= 2 and (best is None or count > best[1]):
                     best = (dirpath, count)
-        if best:
-            search_root = best[0]
-            described = os.path.relpath(search_root, root)
+        if not best:
+            # A book with no folder of concept pages has no concept pages:
+            # its other chapters are never offered in their place.
+            return [], ""
+        search_root = best[0]
+        described = os.path.relpath(search_root, root)
 
     pages = []
     current = os.path.abspath(current_path) if current_path else None
@@ -126,7 +131,8 @@ def concept_pages_in(paths, current, read_head, folder=None):
     "/", from the top of the book) rather than a folder on this Mac.
 
     `read_head(path)` returns the start of a page's text, or None. The same
-    folders are skipped and the same folder of definitions is preferred.
+    folders are skipped, and the same folder of definitions is the only
+    place concept pages come from.
     """
     def kept(path):
         return not any(d in IGNORE_DIRS or d.startswith(".")
@@ -147,8 +153,9 @@ def concept_pages_in(paths, current, read_head, folder=None):
                     and counts[here] >= 2 \
                     and (best is None or counts[here] > best[1]):
                 best = (here, counts[here])
-        if best:
-            search = described = best[0]
+        if not best:
+            return [], ""
+        search = described = best[0]
 
     pages = []
     for p in notes:

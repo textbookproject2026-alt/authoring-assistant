@@ -1571,16 +1571,20 @@ def _plan_on_drafts(token, book, suggestion):
     path = suggestion["path"]
     text, snap, problem = None, None, None
     if console.literal_replacement(suggestion["suggestion"] or ""):
-        snap = drafts.snapshot(token, book) if token else github.Problem(
-            "You aren't signed in.")
-        if isinstance(snap, github.Problem):
-            snap, problem = None, snap
-        elif drafts.safe_path(path) and path in snap["files"]:
-            data = github.blob_bytes(token, book, snap["files"][path])
-            if isinstance(data, github.Problem):
-                snap, problem = None, data
-            else:
-                text = drafts.text_of(data)
+        # The chapter is asked for alongside the listing of drafts, not after
+        # it: one round trip to the service rather than four in a row.
+        if not token:
+            read = github.Problem("You aren't signed in.")
+        elif drafts.safe_path(path):
+            read = drafts.snapshot_with(token, book, path)
+        else:
+            read = drafts.snapshot(token, book)
+            read = read if isinstance(read, github.Problem) else (read, None)
+        if isinstance(read, github.Problem):
+            problem = read
+        else:
+            snap, data = read
+            text = None if data is None else drafts.text_of(data)
     plan = console.plan_in_text(text, path, suggestion["suggestion"])
     if problem is not None:
         plan["reason"] = ("The drafts area couldn't be read just now, so the "
@@ -1711,10 +1715,16 @@ def r_console_accept(handler, data):
     commit_url = ""
     if sent:
         commit_url = sent.get("url") or github.commit_page(book, sent.get("sha"))
+    by_hand = not sent and not apply_vault
+    if by_hand and _already_accepted(book, number):
+        raise KeyError("You have already accepted this one, and the reader "
+                       "has been thanked. Once the change is in the drafts "
+                       "area, press “I've made the change”.")
     reply = console.reply_on_accept(commit_url, vault_changed=apply_vault)
     done = ("The chapter was changed in the drafts area. " if sent else
             "The chapter was changed in your vault. " if apply_vault else "")
-    failed, problem = _reply_and_close(token, book, number, reply, commit_url)
+    failed, problem = _reply_and_close(token, book, number, reply, commit_url,
+                                       keep_open=by_hand)
     if failed == "reply":
         raise RuntimeError(done + "The thank-you could not be sent: " +
                            problem.message + " The suggestion is still open.")
@@ -1732,23 +1742,44 @@ def r_console_accept(handler, data):
         raise RuntimeError(done + "The thank-you was sent, but the suggestion "
                            "could not be marked as dealt with: " +
                            problem.message)
-    steps.append("The suggestion was marked as dealt with.")
+    if failed == "label":
+        raise RuntimeError("The thank-you was sent, but the suggestion could "
+                           "not be marked as accepted: " + problem.message +
+                           " It is still open, under Waiting for you.")
+    if by_hand:
+        steps.append("The suggestion stays under Waiting for you, marked "
+                     "Accepted, until the change is made. Once it is in the "
+                     "drafts area, open it and press “I've made the change”.")
+    else:
+        steps.append("The suggestion was marked as dealt with.")
     CONSOLE["plans"].pop((book.slug, str(number)), None)
-    out = {"done": True, "steps": steps}
+    out = {"done": True, "steps": steps, "kept_open": by_hand}
     if sent:
         out.update(sha=sent["sha"], url=commit_url, branch=book.drafts_branch)
     return out
 
 
-def _reply_and_close(token, book, number, reply, commit_url=""):
-    """Answer a suggestion and close it: the only way the console closes one.
+def _already_accepted(book, number):
+    """True if the suggestion, as this app last fetched it, was already
+    accepted and left open for the author to make by hand."""
+    return bool(_loaded_suggestion(book, number).get("accepted"))
+
+
+def _reply_and_close(token, book, number, reply, commit_url="",
+                     keep_open=False):
+    """Answer a suggestion and close it: the only way the console closes one,
+    and the only way it answers one.
 
     The rule it holds every reply to: the reader is told the chapter changed
     only when a commit holds the change, and the reply links that commit. A
     reply that says otherwise is not sent, and the suggestion stays open.
 
-    Returns (None, None), or ("reply" | "close", the problem) for the step
-    that failed. A failed reply leaves the suggestion open.
+    `keep_open` is for a suggestion accepted but not yet made, because the
+    tool couldn't make it: it is labelled accepted and left open, so that it
+    stays on the author's list until a commit holds the change.
+
+    Returns (None, None), or ("reply" | "close" | "label", the problem) for
+    the step that failed. A failed reply leaves the suggestion open.
     """
     if console.claims_change(reply) and not (commit_url and commit_url in reply):
         raise RuntimeError(
@@ -1759,10 +1790,76 @@ def _reply_and_close(token, book, number, reply, commit_url=""):
     if isinstance(replied, github.Problem):
         return "reply", replied
     github.drop_label(token, book, number, console.NEEDS_TRIAGE)
+    if keep_open:
+        labelled = github.add_label(token, book, number, console.ACCEPTED)
+        if isinstance(labelled, github.Problem):
+            return "label", labelled
+        _mark_loaded_accepted(book, number)
+        return None, None
     closed = github.close_issue(token, book, number)
     if isinstance(closed, github.Problem):
         return "close", closed
     return None, None
+
+
+def _mark_loaded_accepted(book, number):
+    loaded = CONSOLE["loaded"] or {}
+    if loaded.get("slug") == book.slug:
+        s = (loaded.get("suggestions") or {}).get(str(number))
+        if s is not None:
+            s["accepted"] = True
+
+
+def r_console_made(handler, data):
+    """Close a suggestion accepted by hand, once a commit holds the change.
+
+    The tool can't see whether the change the author made is the one the
+    reader asked for; the author says so. What it can see is whether anything
+    has changed the page in the drafts area since the suggestion was
+    accepted, and it closes only with a link to that commit. Asked with no
+    `sha`, it names the commit it would link, and changes nothing; asked with
+    the `sha` it named, it replies and closes.
+    """
+    token = _token()
+    if not token:
+        _needs_signin()
+    book = _book_for(data)
+    _require_write(book)
+    number = data.get("number")
+    suggestion = _loaded_suggestion(book, number)
+    if not suggestion.get("accepted"):
+        raise KeyError("This suggestion hasn't been accepted yet.")
+    path = suggestion["path"]
+    if not drafts.safe_path(path):
+        raise KeyError("This suggestion names a page outside the book, so "
+                       "there is no change to link it to. Reply to it on "
+                       "the website instead.")
+    since = _unwrap(github.labelled_at(token, book, number, console.ACCEPTED))
+    changes = [] if since is None else _unwrap(
+        github.changes_since(token, book, path, since))
+    if not changes:
+        raise KeyError(
+            f"Nothing has changed {suggestion['page']} in the drafts area since "
+            "you accepted this, so there is no change to show the reader yet. "
+            "Make the change under Chapters and send it to drafts, then press "
+            "this again.")
+    newest = changes[0]
+    if not data.get("sha"):
+        return {"change": newest, "page": suggestion["page"]}
+    if data["sha"] != newest["sha"]:
+        raise KeyError("The page has changed again since you looked, so "
+                       "nothing was sent. Please look again.")
+    reply = console.thanks_with_change(newest["url"])
+    failed, problem = _reply_and_close(token, book, number, reply, newest["url"])
+    if failed == "reply":
+        raise RuntimeError("The thank-you could not be sent: " +
+                           problem.message + " The suggestion is still open.")
+    if failed == "close":
+        raise RuntimeError("The thank-you was sent, but the suggestion could "
+                           "not be marked as dealt with: " + problem.message)
+    return {"done": True, "steps": [
+        "A thank-you was sent, with a link to your change.",
+        "The suggestion was marked as dealt with."]}
 
 
 def r_console_decline(handler, data):
@@ -2084,6 +2181,7 @@ ROUTES = {
     "/api/console/plan": r_console_plan,
     "/api/console/accept": r_console_accept,
     "/api/console/decline": r_console_decline,
+    "/api/console/made": r_console_made,
     "/api/console/draft-detail": r_console_draft_detail,
     "/api/console/draft-accept": r_console_draft_accept,
     "/api/console/draft-decline": r_console_draft_decline,

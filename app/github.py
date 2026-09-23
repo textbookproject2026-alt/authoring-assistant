@@ -377,6 +377,47 @@ def drop_label(token, book, number, label):
     return result
 
 
+def add_label(token, book, number, label):
+    return _request("POST", f"{API}/repos/{book.repo}/issues/{number}/labels",
+                    token=token, payload={"labels": [label]})
+
+
+def labelled_at(token, book, number, label):
+    """When a label was last put on an issue, or None if it never was."""
+    result = _request("GET", f"{API}/repos/{book.repo}/issues/{number}/events"
+                      "?per_page=100", token=token)
+    if isinstance(result, Problem):
+        return result
+    times = [e.get("created_at") for e in result
+             if isinstance(e, dict) and e.get("event") == "labeled"
+             and (e.get("label") or {}).get("name") == label]
+    return max((t for t in times if t), default=None)
+
+
+def changes_since(token, book, path, since):
+    """Commits on the drafts branch that changed one file after a moment,
+    newest first: [{"sha", "url", "who", "when", "message"}], or a Problem."""
+    url = (f"{API}/repos/{book.repo}/commits"
+           f"?sha={urllib.parse.quote(book.drafts_branch, safe='')}"
+           f"&path={urllib.parse.quote(path)}"
+           f"&since={urllib.parse.quote(since)}&per_page=20")
+    result = _request("GET", url, token=token)
+    if isinstance(result, Problem):
+        return result
+    out = []
+    for item in result:
+        commit = item.get("commit") or {}
+        out.append({
+            "sha": item.get("sha"),
+            "url": item.get("html_url") or commit_page(book, item.get("sha")),
+            "who": ((item.get("author") or {}).get("login")
+                    or (commit.get("author") or {}).get("name") or ""),
+            "when": (commit.get("author") or {}).get("date"),
+            "message": (commit.get("message") or "").split("\n")[0],
+        })
+    return [c for c in out if c["sha"]]
+
+
 def accept_change(token, book, number, title):
     """Fold a proposed change into the drafts area.
 
@@ -430,18 +471,28 @@ def branch_head(token, book):
         "The drafts area could not be read. Nothing was changed.")
 
 
-def commit_tree(token, book, sha):
-    """The tree a commit holds, or a Problem."""
-    result = _request("GET", f"{API}/repos/{book.repo}/git/commits/{sha}",
-                      token=token)
+def branch_tip(token, book):
+    """(the commit the drafts branch points at, its tree) in one call, or a
+    Problem."""
+    result = _request("GET", f"{API}/repos/{book.repo}/commits?sha="
+                      f"{urllib.parse.quote(book.drafts_branch, safe='')}"
+                      "&per_page=1", token=token)
     if isinstance(result, Problem):
         return result
-    return ((result.get("tree") or {}).get("sha")) or Problem(
-        "The drafts area could not be read. Nothing was changed.")
+    item = result[0] if isinstance(result, list) and result else {}
+    sha = item.get("sha")
+    tree = ((item.get("commit") or {}).get("tree") or {}).get("sha")
+    if not sha or not tree:
+        return Problem("The drafts area could not be read. Nothing was changed.")
+    return sha, tree
 
 
 def whole_tree(token, book, tree_sha):
-    """Every file in a tree, with the flag saying whether the list was cut short."""
+    """Every file in a tree, with the flag saying whether the list was cut short.
+
+    `tree_sha` may name a commit or a branch instead: the service lists that
+    commit's tree, and its answer's "sha" is then the commit's.
+    """
     return _request("GET", f"{API}/repos/{book.repo}/git/trees/{tree_sha}"
                     f"?recursive=1", token=token)
 
@@ -452,6 +503,24 @@ def blob_bytes(token, book, sha):
                       token=token)
     if isinstance(result, Problem):
         return result
+    try:
+        return base64.b64decode(result.get("content") or "")
+    except (ValueError, TypeError):
+        return Problem("An unreadable reply came back. Nothing was changed.")
+
+
+def file_bytes_at(token, book, path, sha):
+    """One file's contents as of a commit, in one call, or a Problem.
+
+    Only the service's word for which file it is: callers check the bytes
+    against the tree they read before relying on them.
+    """
+    result = _request("GET", f"{API}/repos/{book.repo}/contents/"
+                      f"{urllib.parse.quote(path)}?ref={sha}", token=token)
+    if isinstance(result, Problem):
+        return result
+    if not isinstance(result, dict) or result.get("encoding") != "base64":
+        return Problem("The file is too large to read in one go.")
     try:
         return base64.b64decode(result.get("content") or "")
     except (ValueError, TypeError):

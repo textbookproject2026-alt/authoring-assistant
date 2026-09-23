@@ -482,11 +482,8 @@ class DraftsSession(Session):
 
     def chapters(self):
         out = []
-        for path in self.snap["files"]:
+        for path in book_pages(self.snap["files"], self.CONTENT):
             parts = path.split("/")
-            if not is_markdown(path) or any(
-                    d in VAULT_SKIP_DIRS or d.startswith(".") for d in parts[:-1]):
-                continue
             folder = "/".join(parts[:-1])
             out.append({"path": path, "rel": path,
                         "name": parts[-1].rsplit(".", 1)[0],
@@ -582,6 +579,30 @@ class DraftsSession(Session):
 
     def commit(self, accepted_ids, expand_groups):
         raise RuntimeError("A chapter from the drafts area is sent, not saved.")
+
+
+# Files every repository has that are about the repository, not pages of the
+# book: never offered as chapters.
+REPOSITORY_FILES = {"readme", "contributing", "license", "licence", "changelog",
+                    "code_of_conduct", "code-of-conduct", "security", "authors",
+                    "notice"}
+
+
+def book_pages(paths, content="content"):
+    """The book's own pages among a repository's files, in no special order.
+
+    A book laid out for Quartz keeps its pages in its content folder, and
+    everything outside that folder belongs to the website; otherwise the
+    pages are the markdown files outside the folders the vault skips, less
+    the files that describe the repository (README and the like).
+    """
+    notes = [p for p in paths if is_markdown(p) and not any(
+        d in VAULT_SKIP_DIRS or d.startswith(".") for d in p.split("/")[:-1])]
+    inside = [p for p in notes if p.startswith(content + "/")]
+    if inside:
+        return inside
+    return [p for p in notes if p.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            .casefold() not in REPOSITORY_FILES]
 
 
 def drafts_text(data, path):

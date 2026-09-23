@@ -1662,6 +1662,8 @@ function renderConsole() {
     const li = el('li');
     const b = el('button');
     b.appendChild(el('strong', '', s.page));
+    // Accepted, but not yet made: the list is the author's to-do list.
+    if (s.accepted) b.appendChild(el('span', 'tag', 'Accepted — yours to make'));
     b.appendChild(el('span', 'who', s.who + ' · ' + when(s.when)));
     b.appendChild(el('span', 'snip', (s.suggestion || '').slice(0, 140)));
     b.onclick = () => openSuggestion(s);
@@ -1730,13 +1732,26 @@ async function openSuggestion(s) {
 
   const box = document.getElementById('sug-plan');
   box.innerHTML = '';
-  box.appendChild(el('p', 'quiet', 'Looking at your chapter… this can take a few seconds.'));
+  // The plan takes several seconds to come back from the author's Mac, so
+  // the wait is shown moving, with the seconds counted.
+  const waiting = el('p', 'quiet');
+  waiting.appendChild(el('span', 'spinner small'));
+  const words = el('span', '', 'Looking at your chapter in the drafts area…');
+  waiting.appendChild(words);
+  box.appendChild(waiting);
+  const started = Date.now();
+  const ticking = setInterval(() => {
+    words.textContent = 'Looking at your chapter in the drafts area… ' +
+      Math.round((Date.now() - started) / 1000) + ' s';
+  }, 1000);
 
   // Accept answers the plan on screen, so there is nothing to accept until
   // one is. Pressed while the plan was on its way, it would tell the reader
   // the author will do by hand what the tool is about to offer to do.
   const accept = document.getElementById('sug-accept');
   accept.disabled = true;
+  accept.classList.remove('hidden');
+  document.getElementById('sug-made').classList.add('hidden');
   let plan;
   try {
     plan = await bookApi('/api/console/plan', { number: s.number });
@@ -1745,6 +1760,8 @@ async function openSuggestion(s) {
     box.innerHTML = '';
     box.appendChild(el('p', 'notice bad', e.message));
     return;
+  } finally {
+    clearInterval(ticking);
   }
   // The author may have gone on to another suggestion meanwhile.
   if (C.suggestion !== s) return;
@@ -1802,15 +1819,27 @@ function renderPlan() {
   }
 
   const card = el('div', 'card');
-  card.appendChild(el('p', 'card-label', 'This one is for you to do'));
+  const accepted = C.suggestion && C.suggestion.accepted;
+  card.appendChild(el('p', 'card-label',
+    accepted ? 'You accepted this — it is yours to make' : 'This one is for you to do'));
   card.appendChild(el('p', '', p.reason));
   if (vaultTick) {
     card.appendChild(el('p', 'quiet', 'It can still be made in your vault:'));
     card.appendChild(vaultTick);
+  } else if (accepted) {
+    // Already thanked: what is left is to make the change, and then to
+    // close it with a link to the change that made it.
+    card.appendChild(el('p', 'quiet',
+      'The reader has been thanked and told you will make the change. Make it under ' +
+      'Chapters and send it to the drafts area, then press “I\'ve made the change”: ' +
+      'the reader is sent a link to it and the suggestion is closed.'));
+    document.getElementById('sug-accept').classList.add('hidden');
+    document.getElementById('sug-made').classList.remove('hidden');
   } else {
     card.appendChild(el('p', 'quiet',
-      'Accepting thanks them, tells them you will make the change by hand, and clears it ' +
-      'from this list. Nothing in the chapter is changed — make the change yourself under Chapters.'));
+      'Accepting thanks them and tells them you will make the change by hand. It stays ' +
+      'in this list, marked Accepted, until you have. Nothing in the chapter is changed — ' +
+      'make the change yourself under Chapters.'));
   }
   box.appendChild(card);
 }
@@ -1840,10 +1869,48 @@ document.getElementById('sug-accept').onclick = async () => {
       renderPlan();
       return fail(r.message);
     }
-    consoleDone('Accepted', r.steps);
+    consoleDone(r.kept_open ? 'Accepted — now yours to make' : 'Accepted', r.steps);
   } catch (e) {
     fail(e.message);
   } finally { btn.disabled = false; }
+};
+
+// Closing a suggestion accepted by hand: the app names the change it found
+// on the page since the acceptance, and the author confirms it is the one.
+document.getElementById('sug-made').onclick = async () => {
+  const s = C.suggestion;
+  if (!s) return;
+  const btn = document.getElementById('sug-made');
+  btn.disabled = true;
+  let found;
+  try {
+    found = await bookApi('/api/console/made', { number: s.number });
+  } catch (e) {
+    return fail(e.message);
+  } finally { btn.disabled = false; }
+  if (C.suggestion !== s) return;
+  const c = found.change;
+  const card = el('div', 'card after');
+  card.appendChild(el('p', 'card-label', 'The latest change to ' + found.page));
+  card.appendChild(el('p', '', '“' + c.message + '”'));
+  card.appendChild(el('p', 'quiet', 'by ' + c.who + ' · ' + when(c.when)));
+  card.appendChild(el('p', 'quiet',
+    'If this is the change they suggested, the reader is thanked with a link to it ' +
+    'and the suggestion is closed.'));
+  const yes = el('button', 'yes', 'Yes, this is it — close the suggestion');
+  yes.id = 'sug-made-confirm';
+  yes.onclick = async () => {
+    yes.disabled = true;
+    try {
+      const r = await bookApi('/api/console/made', { number: s.number, sha: c.sha });
+      consoleDone('Closed, with a link to your change', r.steps);
+    } catch (e) {
+      fail(e.message);
+    } finally { yes.disabled = false; }
+  };
+  card.appendChild(yes);
+  const box = document.getElementById('sug-plan');
+  box.appendChild(card);
 };
 
 document.getElementById('sug-decline').onclick = async () => {
