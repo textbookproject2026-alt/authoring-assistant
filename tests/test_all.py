@@ -1583,7 +1583,7 @@ _server.r_books_choose(None, {"slug": "book-a"})   # the author moves to book A
 _server._open_vault(_va)                            # and opens its vault
 _svc.calls.clear()
 _msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
-    None, dict(_B, number=42, apply_vault=True))))
+    None, dict(_B, number=42, apply_vault=True, plan_id=_planB["plan_id"]))))
 check("an old screen for book B can't act once book A's vault is open",
       _msg is not None and "different book" in _msg, _msg)
 check("…and neither chapter was touched",
@@ -1601,10 +1601,11 @@ _forged = {"can_apply": True, "book": "book-b", "vault": _va,
            "file_path": os.path.join(_va, "chapters", "chapter-01.md"),
            "old": "The the words", "new": "The words", "line_no": 3,
            "before": "The the words are here."}
-_server.CONSOLE["plans"][("book-b", "42")] = {"vault_plan": _forged, "head": None}
+_server.CONSOLE["plans"][("book-b", "42")] = {"vault_plan": _forged, "head": None,
+                                              "id": "forged"}
 _svc.calls.clear()
 _msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
-    None, dict(_B, number=42, apply_vault=True))))
+    None, dict(_B, number=42, apply_vault=True, plan_id="forged"))))
 check("the write is refused when the vault on disk is another book",
       _msg is not None and "Nothing was written" in _msg and
       "Book B" in _msg and "Book A" in _msg, _msg)
@@ -1637,7 +1638,7 @@ with open(_cfg, "w") as fh:
     json.dump({"slug": "book-b"}, fh)
 _svc.calls.clear()
 _msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
-    None, dict(_A, number=41, apply_vault=True))))
+    None, dict(_A, number=41, apply_vault=True, plan_id=_planA["plan_id"]))))
 check("a vault whose settings changed after opening is refused",
       _msg is not None and "changed after it was opened" in _msg, _msg)
 check("…and nothing was written or sent",
@@ -1651,7 +1652,7 @@ with open(_gitcfg) as fh:
 with open(_gitcfg, "w") as fh:
     fh.write(_good_git.replace("Example-Org/Book-A", "example-org/book-b"))
 _msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
-    None, dict(_A, number=41, apply_vault=True))))
+    None, dict(_A, number=41, apply_vault=True, plan_id=_planA["plan_id"]))))
 check("a vault whose remote changed after opening is refused",
       _msg is not None and _chapter(_va) == _A_TEXT and _writes(_svc) == [],
       _msg)
@@ -1662,19 +1663,19 @@ with open(_gitcfg, "w") as fh:
 _va2 = _make_book_vault("book-a", "git@github.com:example-org/book-a.git")
 _server._open_vault(_va2)
 _server.CONSOLE["plans"][("book-a", "41")] = {
-    "vault_plan": dict(_forged, book="book-a"), "head": None}
+    "vault_plan": dict(_forged, book="book-a"), "head": None, "id": "forged"}
 _msg = _with_service(_svc, lambda: _refused(lambda: _server.r_console_accept(
-    None, dict(_A, number=41, apply_vault=True))))
+    None, dict(_A, number=41, apply_vault=True, plan_id="forged"))))
 check("a plan made for a different vault of the same book is refused",
       _msg is not None and "different book or vault" in _msg and
       _chapter(_va) == _A_TEXT, _msg)
 
 # The ordinary case still works, and keeps its guarantees.
 _server._open_vault(_va)
-_with_service(_svc, lambda: _server.r_console_plan(None, dict(_A, number=41)))
+_planA = _with_service(_svc, lambda: _server.r_console_plan(None, dict(_A, number=41)))
 _svc.calls.clear()
 _ok = _with_service(_svc, lambda: _server.r_console_accept(
-    None, dict(_A, number=41, apply_vault=True)))
+    None, dict(_A, number=41, apply_vault=True, plan_id=_planA["plan_id"])))
 _after = _chapter(_va).split("\n")
 check("accepting into the matching vault changes exactly the one line",
       _ok["done"] and _after[2] == "The words are here." and
@@ -2537,7 +2538,7 @@ check("a suggestion for a page drafts doesn't have says so",
 _pl = _with_service(_sr, lambda: _server.r_console_plan(None, dict(_A, number=51)))
 _s0 = _sr.branches["drafts"]
 _ac = _with_service(_sr, lambda: _server.r_console_accept(
-    None, dict(_A, number=51, apply=True, head=_pl["head"])))
+    None, dict(_A, number=51, apply=True, head=_pl["head"], plan_id=_pl["plan_id"])))
 _new = _sr.branches["drafts"]
 _after = _sr.files()
 _comments = [c for c in _sr.calls if c[0] == "POST" and c[1].endswith("/issues/51/comments")]
@@ -2563,7 +2564,7 @@ _with_service(_sr2, lambda: _server.r_console_load(None, dict(_A)))
 _pl = _with_service(_sr2, lambda: _server.r_console_plan(None, dict(_A, number=51)))
 _sr2.before_move = lambda: _sr2.push("cms-user", {"glossary.md": "# Glossary\n\n## Published\n"})
 _mv = _with_service(_sr2, lambda: _server.r_console_accept(
-    None, dict(_A, number=51, apply=True, head=_pl["head"])))
+    None, dict(_A, number=51, apply=True, head=_pl["head"], plan_id=_pl["plan_id"])))
 _theirs = _sr2.branches["drafts"]
 check("if drafts moved, accepting changes nothing and leaves the suggestion open",
       _mv.get("moved") and "still open" in _mv["message"]
@@ -2572,7 +2573,8 @@ check("if drafts moved, accepting changes nothing and leaves the suggestion open
 check("and offers the change again, read from drafts as it is now",
       _mv["plan"]["can_apply"] and _mv["plan"]["head"] == _theirs, _mv["plan"])
 _ok = _with_service(_sr2, lambda: _server.r_console_accept(
-    None, dict(_A, number=51, apply=True, head=_mv["plan"]["head"])))
+    None, dict(_A, number=51, apply=True, head=_mv["plan"]["head"],
+                plan_id=_mv["plan"]["plan_id"])))
 check("accepting on the fresh offer goes on top of their change",
       _ok["done"] and _sr2.commits[_sr2.branches["drafts"]]["parents"] == [_theirs]
       and _sr2.files()["glossary.md"] == b"# Glossary\n\n## Published\n")
@@ -2588,7 +2590,7 @@ _pl = _with_service(_sr3, lambda: _server.r_console_plan(None, dict(_A, number=5
 check("with the book's vault open, the vault is offered beside drafts",
       _pl["can_apply"] and _pl["vault"]["can_apply"] and _pl["vault"]["suggested"], _pl)
 _ok = _with_service(_sr3, lambda: _server.r_console_accept(
-    None, dict(_A, number=51, apply=True, apply_vault=True, head=_pl["head"])))
+    None, dict(_A, number=51, apply=True, apply_vault=True, head=_pl["head"], plan_id=_pl["plan_id"])))
 check("accepting with both makes the change on drafts and in the vault",
       _sr3.files()["chapters/chapter-01.md"] == b"# One\n\nThe words are here.\nLeave me.\n"
       and "The words are here." in _chapter(_sv) and "The the" not in _chapter(_sv),
@@ -2651,10 +2653,10 @@ check("a suggestion not written as an exact replacement can't be made by the too
       and "exact replacement" in _pl["reason"], _pl)
 check("and asking the tool to make it anyway is refused, with nothing sent",
       _refused(lambda: _with_service(_rb, lambda: _server.r_console_accept(
-          None, dict(_BB, number=61, apply=True, head=_pl["head"])))) is not None
+          None, dict(_BB, number=61, apply=True, head=_pl["head"], plan_id=_pl["plan_id"])))) is not None
       and not _replies(_rb, 61) and not _closes(_rb, 61))
 _ac = _with_service(_rb, lambda: _server.r_console_accept(
-    None, dict(_BB, number=61, head=_pl["head"])))
+    None, dict(_BB, number=61, head=_pl["head"], plan_id=_pl["plan_id"])))
 _said = _replies(_rb, 61)
 check("accepting it with no vault open, on a book not on Publish, commits nothing",
       set(_rb.commits) == _commits_before and _rb.branches == _branches_before,
@@ -2671,7 +2673,7 @@ check("the suggestion is then closed, once", len(_closes(_rb, 61)) == 1)
 
 _pl = _with_service(_rb, lambda: _server.r_console_plan(None, dict(_BB, number=62)))
 _ac = _with_service(_rb, lambda: _server.r_console_accept(
-    None, dict(_BB, number=62, apply=True, head=_pl["head"])))
+    None, dict(_BB, number=62, apply=True, head=_pl["head"], plan_id=_pl["plan_id"])))
 _said = _replies(_rb, 62)
 _made = _rb.branches["staging"]
 check("an exact replacement on book two becomes one commit on its drafts branch",
@@ -2682,6 +2684,63 @@ check("and only then is the reader told it changed, with a link to that commit",
       len(_said) == 1 and _console.claims_change(_said[0])
       and f"https://example.invalid/commit/{_made}" in _said[0]
       and _ac["url"] in _said[0] and len(_closes(_rb, 62)) == 1, _said)
+
+# Found in the live proof on book two, issue #6: an exact replacement, found
+# once on one line of the chapter on drafts, was answered "by hand" with
+# nothing committed. The plan takes four calls to the service, about twelve
+# seconds from the author's Mac, and Accept pressed in that time arrived as
+# "no change". The issue's title and body and the chapter are the live ones,
+# byte for byte.
+_LIVE6 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "fixtures", "live-issue-6")
+with open(os.path.join(_LIVE6, "issue.json"), encoding="utf-8") as fh:
+    _issue6 = json.load(fh)
+with open(os.path.join(_LIVE6, "chapter-2.md"), "rb") as fh:
+    _CH2 = fh.read()
+_rb6 = _GitRepo("example-org/book-b", {"content/chapter-2.md": _CH2.decode("utf-8")})
+_root6 = _rb6.branches["main"]
+_rb6.branches = {"published": _root6, "staging": _root6}
+_rb6.issues = {"example-org/book-b": [dict(
+    _ISSUE, number=6, title=_issue6["title"], body=_issue6["body"],
+    repository_url=f"{_github.API}/repos/example-org/book-b")]}
+_with_service(_rb6, lambda: _server.r_console_load(None, dict(_BB)))
+check("issue #6 as filed is read as the exact replacement it is",
+      _server.CONSOLE["loaded"]["suggestions"]["6"]["path"] == "content/chapter-2.md"
+      and _console.literal_replacement(
+          _server.CONSOLE["loaded"]["suggestions"]["6"]["suggestion"])
+      == {"old": "seperately", "new": "separately"})
+_pl6 = _with_service(_rb6, lambda: _server.r_console_plan(None, dict(_BB, number=6)))
+check("and the tool offers to make it, on line 13 of the chapter on drafts",
+      _pl6["can_apply"] and _pl6["line_no"] == 13 and _pl6["plan_id"]
+      and _pl6["after"] == "separately in each book's repository.", _pl6)
+_early = _with_service(_rb6, lambda: _refused(lambda: _server.r_console_accept(
+    None, dict(_BB, number=6, apply=False, apply_vault=False, head=None))))
+check("Accept pressed before the plan reached the page is refused",
+      _early is not None and "look at the change again" in _early, _early)
+_old6 = _pl6["plan_id"]
+_pl6 = _with_service(_rb6, lambda: _server.r_console_plan(None, dict(_BB, number=6)))
+check("and so is one answering a plan from an earlier look",
+      _old6 != _pl6["plan_id"] and _refused(lambda: _with_service(
+          _rb6, lambda: _server.r_console_accept(None, dict(
+              _BB, number=6, apply=True, head=_pl6["head"], plan_id=_old6))))
+      is not None)
+check("…with nothing committed, sent or closed",
+      _rb6.branches["staging"] == _root6 and not _replies(_rb6, 6)
+      and not _closes(_rb6, 6))
+_ac6 = _with_service(_rb6, lambda: _server.r_console_accept(None, dict(
+    _BB, number=6, apply=True, apply_vault=False, head=_pl6["head"],
+    plan_id=_pl6["plan_id"])))
+_made6 = _rb6.branches["staging"]
+_said6 = _replies(_rb6, 6)
+check("accepting the plan the page was shown makes the one-word change on drafts",
+      _rb6.commits[_made6]["parents"] == [_root6]
+      and _rb6.files("staging")["content/chapter-2.md"]
+      == _CH2.replace(b"seperately", b"separately")
+      and _rb6.branches["published"] == _root6)
+check("and the reader is told so, with a link to the commit",
+      len(_said6) == 1 and _said6[0] != _console.TAKEN_ON
+      and f"https://example.invalid/commit/{_made6}" in _said6[0]
+      and len(_closes(_rb6, 6)) == 1, _said6)
 
 # The rule, held by the one door every close goes through.
 _gate = _Service()
