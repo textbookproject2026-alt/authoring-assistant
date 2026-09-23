@@ -205,6 +205,21 @@ class Session:
         except OSError:
             return True
 
+    # -- where the concept pages and the glossary come from -------------------
+
+    def concept_pages(self, folder=None):
+        return terms.discover_concept_pages(self.root, self.chapter_path, folder)
+
+    def glossary_terms(self):
+        return glossary_mod.existing_glossary_terms(self.glossary_path)
+
+    def glossary_exists(self):
+        return os.path.exists(self.glossary_path)
+
+    def plan_glossary(self, entries, source_name):
+        return glossary_mod.plan_glossary(self.glossary_path, entries,
+                                          source_name=source_name)
+
     # -- the three analyses ---------------------------------------------------
 
     def run_analyses(self, options):
@@ -225,9 +240,8 @@ class Session:
                 notes.append("No citations matching your reference list were "
                              "found in this chapter.")
 
-        self.pages, self.concept_source = terms.discover_concept_pages(
-            self.root, self.chapter_path, options.get("concept_folder")
-        )
+        self.pages, self.concept_source = self.concept_pages(
+            options.get("concept_folder"))
 
         if "terms" in chosen:
             f, n = terms.analyse(self.docmap, self.pages, first_only)
@@ -238,7 +252,7 @@ class Session:
                              "this chapter.")
 
         if "glossary" in chosen:
-            existing = glossary_mod.existing_glossary_terms(self.glossary_path)
+            existing = self.glossary_terms()
             entries = references.parse_reference_list(self.docmap)
             authors = {s for e in entries for s in e.surnames}
             f, n = glossary_mod.analyse(
@@ -365,9 +379,8 @@ class Session:
             for f in accepted if f["kind"] == "glossary"
         ]
         chapter_name = os.path.basename(self.chapter_path)
-        g_before, g_after, g_added, _, _, _ = glossary_mod.plan_glossary(
-            self.glossary_path, gloss_terms, source_name=chapter_name
-        )
+        g_before, g_after, g_added, _, _, _ = self.plan_glossary(
+            gloss_terms, chapter_name)
 
         return {
             "new_text": new_text,
@@ -377,7 +390,7 @@ class Session:
                 for i, b, a in line_diff(self.docmap, new_text)
             ],
             "glossary_path": self.glossary_path,
-            "glossary_exists": os.path.exists(self.glossary_path),
+            "glossary_exists": self.glossary_exists(),
             "glossary_before": g_before,
             "glossary_after": g_after,
             "glossary_added": [r[2] for r in g_added],
@@ -417,6 +430,169 @@ class Session:
             "glossary_added": preview["glossary_added"],
             "changed_lines": len(preview["changed_lines"]),
         }
+
+
+class DraftsSession(Session):
+    """The same work on a chapter held in a book's drafts area, not on disk.
+
+    Everything is read from one snapshot of the drafts branch: the chapter,
+    the concept pages and the book's glossary.md (see glossary_for). Nothing is
+    written here. `changes` says which files the author's choices change,
+    with the same proof as saving to disk that no untouched line moved, and
+    the server sends them as one commit on top of the snapshot (drafts.py).
+
+    `blob(sha)` returns a file's bytes, or raises KeyError with the reason.
+    """
+
+    GLOSSARY = "glossary.md"
+    # A book laid out for Quartz keeps its pages in this folder, which is
+    # where the author's vault would start.
+    CONTENT = "content"
+
+    def __init__(self, book, snap, blob):
+        self.book = book
+        self.mode = "drafts"
+        self.target = self.root = None
+        self.snap = snap
+        self._blob = blob
+        self._cache = {}
+        self.chapter_path = None
+        self.docmap = None
+        self.read_sha = None
+        self.read_mtime = None
+        self.chapter_blob = None
+        self.glossary_path = None
+        self.glossary_blob = None
+        self.glossary_text = None
+        self.findings = []
+        self.anchor_edits = {}
+        self.notes = []
+        self.pages = []
+        self.concept_source = ""
+        self.options = {}
+        self.created = time.time()
+
+    def _bytes(self, path):
+        sha = self.snap["files"].get(path)
+        if sha is None:
+            return None
+        if sha not in self._cache:
+            self._cache[sha] = self._blob(sha)
+        return self._cache[sha]
+
+    def chapters(self):
+        out = []
+        for path in self.snap["files"]:
+            parts = path.split("/")
+            if not is_markdown(path) or any(
+                    d in VAULT_SKIP_DIRS or d.startswith(".") for d in parts[:-1]):
+                continue
+            folder = "/".join(parts[:-1])
+            out.append({"path": path, "rel": path,
+                        "name": parts[-1].rsplit(".", 1)[0],
+                        "folder": folder, "size": None})
+        out.sort(key=lambda c: (c["folder"].casefold(), c["rel"].casefold()))
+        return out
+
+    def load_chapter(self, path):
+        if path not in {c["path"] for c in self.chapters()}:
+            raise KeyError("That chapter isn't in the drafts area. Please "
+                           "choose again.")
+        text = drafts_text(self._bytes(path), path)
+        self.glossary_path = self.glossary_for(path)
+        glossary = self._bytes(self.glossary_path)
+        self.glossary_text = (None if glossary is None
+                              else drafts_text(glossary, self.glossary_path))
+        self.glossary_blob = self.snap["files"].get(self.glossary_path)
+        self.chapter_path = path
+        self.chapter_blob = self.snap["files"][path]
+        self.docmap = DocMap(text, path)
+        self.read_sha = sha256(text)
+        return self.docmap
+
+    def glossary_for(self, chapter):
+        """The glossary a chapter's new terms go into: the nearest glossary.md
+        in a folder above it, or, if there is none, a new one at the top of
+        the book's pages (the top of the book, or its content folder)."""
+        parts = chapter.split("/")[:-1]
+        for n in range(len(parts), -1, -1):
+            candidate = "/".join(parts[:n] + [self.GLOSSARY])
+            if candidate in self.snap["files"]:
+                return candidate
+        if parts and parts[0] == self.CONTENT:
+            return f"{self.CONTENT}/{self.GLOSSARY}"
+        return self.GLOSSARY
+
+    def reload(self, snap):
+        """Read again from a newer snapshot. True if the chapter and the
+        glossary are exactly as they were, so the author's choices still hold."""
+        same = (snap["files"].get(self.chapter_path) == self.chapter_blob and
+                snap["files"].get(self.glossary_path) == self.glossary_blob)
+        self.snap = snap
+        if self.chapter_path in snap["files"]:
+            findings = self.findings
+            self.load_chapter(self.chapter_path)
+            if same:
+                self.findings = findings
+        return same
+
+    def preflight(self, we_just_wrote_it=False):
+        """Nothing on this Mac is editing the drafts area, so only the shape
+        of the chapter is worth a word."""
+        warnings = []
+        wrapped = hard_wrapped_paragraphs(self.docmap)
+        if wrapped:
+            warnings.append(
+                f"This chapter has {len(wrapped)} paragraph"
+                f"{'s' if len(wrapped) != 1 else ''} split across several lines. "
+                "The tool still works, and it will not change any line it is not "
+                "editing, but the book normally keeps one paragraph per line."
+            )
+        return warnings, [], bool(wrapped)
+
+    def file_changed_since_read(self):
+        return False   # the drafts branch itself refuses a stale commit
+
+    def concept_pages(self, folder=None):
+        def head(path):
+            data = self._bytes(path)
+            return None if data is None else data[:2000].decode("utf-8", "replace")
+        return terms.concept_pages_in(list(self.snap["files"]),
+                                      self.chapter_path, head, folder)
+
+    def glossary_terms(self):
+        return glossary_mod.glossary_terms_in(self.glossary_text)
+
+    def glossary_exists(self):
+        return self.glossary_text is not None
+
+    def plan_glossary(self, entries, source_name):
+        return glossary_mod.plan_glossary_text(self.glossary_text, entries,
+                                               source_name=source_name)
+
+    def changes(self, accepted_ids, expand_groups):
+        """(preview, {path: new bytes}) for the files the choices change."""
+        preview = self.build_preview(accepted_ids, expand_groups)
+        files = {}
+        if preview["changed_lines"]:
+            files[self.chapter_path] = preview["new_text"].encode("utf-8")
+        if preview["glossary_added"]:
+            files[self.glossary_path] = preview["glossary_after"].encode("utf-8")
+        return preview, files
+
+    def commit(self, accepted_ids, expand_groups):
+        raise RuntimeError("A chapter from the drafts area is sent, not saved.")
+
+
+def drafts_text(data, path):
+    """A file from the drafts area as text to edit, or KeyError saying why not."""
+    from .drafts import text_of
+    text = text_of(data)
+    if text is None:
+        raise KeyError(
+            f"“{path}” in the drafts area isn't plain text this tool can edit "
+            "safely, so it was left alone.")
+    return text
 
 
 def _atomic_write(path, text):

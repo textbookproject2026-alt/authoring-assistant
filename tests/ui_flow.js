@@ -126,6 +126,14 @@ const DRAFTS_MOVED = Object.assign({}, DRAFTS_LOOK, {
   last: { who: 'cms-user', when: '2026-09-22T10:00:00Z', message: 'Update Chapter 6' },
 });
 let sendReplies = [];
+// The drafts area as the Chapters tools and the console see it (§8 step 2).
+let commitReplies = [];
+let acceptReplies = [];
+const PLAN = {
+  can_apply: true, reason: '', line_no: 3, before: 'The the words are here.',
+  after: 'The words are here.', head: 'h1', branch: 'drafts',
+  vault: { name: 'Vault A', can_apply: true, reason: '', suggested: true },
+};
 // Signing out and in again. The fake server refuses a sign-out when told to,
 // as the real one does when the Keychain still has the token afterwards.
 let SIGNED_IN = true;
@@ -228,12 +236,33 @@ const fetch = async (route, opts) => {
                    name: 'Chapter 6', folder: '', size: 30 }],
       glossary_path: '/v/glossary.md', glossary_exists: false,
     },
-    '/api/prepare': {
+    '/api/prepare': body.session_id === 'D1' ? {
+      mode: 'drafts', head: 'd1',
+      chapter: 'chapters/Only.md', chapter_name: 'Only.md',
+      warnings: [], blockers: [], hard_wrapped: false, lines: 3,
+      has_references: true, concept_pages: ['Emergence'],
+      concept_source: 'chapters/Definitions', deepseek: false,
+    } : {
+      mode: 'file', head: null,
       chapter: '/v/Chapters/Chapter 6.md', chapter_name: 'Chapter 6.md',
       warnings: [], blockers: [], hard_wrapped: false, lines: 3,
       has_references: true, concept_pages: ['Emergence'],
       concept_source: 'Definitions', deepseek: false,
     },
+    '/api/drafts/open': {
+      session_id: 'D1', mode: 'drafts', root: null,
+      root_name: 'the drafts area of “Book A”', repo: 'example-org/book-a',
+      branch: 'drafts', head: 'd1', workspace: CURRENT_WS,
+      chapters: [{ path: 'chapters/Only.md', rel: 'chapters/Only.md', name: 'Only',
+                   folder: 'chapters', size: null }],
+    },
+    '/api/commit': route === '/api/commit' ? commitReplies.shift() : null,
+    '/api/drafts/download': {
+      folder: '/Users/x/book-a (drafts, 2026-09-22)', files: 12, left_out: 0,
+      repo: 'example-org/book-a', branch: 'drafts',
+    },
+    '/api/console/plan': PLAN,
+    '/api/console/accept': route === '/api/console/accept' ? acceptReplies.shift() : null,
     '/api/preview': (() => { lastPreviewBody = body; return {
       counts: { references: 1, terms: 2, glossary: 1, expanded: 1 },
       diff: [{ line_no: 5, before: 'a', after: 'b' }],
@@ -628,48 +657,33 @@ function check(name, cond, got) {
         els['cdone-steps'].children.some(c => c.textContent.includes('vault does not know')),
         els['cdone-steps'].children.map(c => c.textContent));
 
-  // --- a vault decides the book ---------------------------------------------
+  // --- the chosen book decides, not the vault (§8 step 2) --------------------
 
   CURRENT_WS = WS_A_VAULT;
   await els['console-refresh'].onclick();
   await new Promise(r => setTimeout(r, 20));
-  check('with a vault open, changing book is still offered, and says it closes the vault',
+  check('with a vault open, changing book is offered with nothing to close first',
         !els['bookbar-change'].classList.contains('hidden') &&
-        els['bookbar-change'].textContent.includes('closes this vault') &&
+        els['bookbar-change'].textContent === 'Change book' &&
         !els['bookbar-close'].classList.contains('hidden'), els['bookbar-change'].textContent);
-  check('the bar says the vault is what decides',
+  check('the bar names the vault without saying it decides the book',
         els['bookbar-vault'].textContent.includes('Vault A') &&
-        els['bookbar-vault'].textContent.includes('decides the book'),
+        !els['bookbar-vault'].textContent.includes('decides'),
         els['bookbar-vault'].textContent);
-  check('the suggestion screen offers to change the chapter in that vault by name',
-        js.includes("'Make this change to my chapter in “' + (WS.vault ? WS.vault.name : '')"),
-        'label missing');
 
+  const closesBefore = calls.filter(c => c === '/api/vault/close').length;
   await els['bookbar-change'].onclick();
   await new Promise(r => setTimeout(r, 30));
-  check('changing book closes the vault and goes straight to choosing another',
-        calls.includes('/api/books/switch') &&
+  check('changing book goes straight to the list, and closes nothing on the way',
+        !calls.includes('/api/books/switch') &&
+        calls.filter(c => c === '/api/vault/close').length === closesBefore &&
         !els['step-books'].classList.contains('hidden') &&
-        els['books-locked'].classList.contains('hidden') &&
         els['books-list'].children.every(li => !li.children[0].disabled),
         calls.slice(-4));
-
-  // Reaching the list another way with a vault still open: its card does the
-  // same in one press.
-  CURRENT_WS = WS_A_VAULT;
-  await ctx.refreshWorkspace();
-  await ctx.openBookPicker();
-  await new Promise(r => setTimeout(r, 30));
-  check('with a vault open, the list explains the vault decides',
-        !els['books-locked'].classList.contains('hidden') &&
-        els['books-locked-text'].textContent.includes('close the vault first'),
-        els['books-locked-text'].textContent);
-  const switchesBefore = calls.filter(c => c === '/api/books/switch').length;
-  await els['books-close-vault'].onclick();
-  await new Promise(r => setTimeout(r, 30));
-  check('its button closes the vault and frees the choice',
-        calls.filter(c => c === '/api/books/switch').length === switchesBefore + 1 &&
-        els['books-locked'].classList.contains('hidden'), calls.slice(-4));
+  check('the list says choosing a different book closes the vault',
+        !els['books-vault'].classList.contains('hidden') &&
+        els['books-vault-text'].textContent.includes('Choosing a different book closes it'),
+        els['books-vault-text'].textContent);
 
   // Another book: whatever was counted for the last one goes.
   await els['books-list'].children[els['books-list'].children.length - 1]
@@ -795,6 +809,124 @@ function check(name, cond, got) {
         els['folder-chosen'].textContent.startsWith('/va/chapters') &&
         els['folder-chosen'].textContent.includes('3 chapters'),
         els['folder-chosen'].textContent);
+
+  // --- a chapter in the drafts area, no folder open (§8 step 2) -------------
+
+  const find = (node, id) => node.id === id ? node
+    : (node.children || []).map(c => find(c, id)).find(Boolean) || null;
+  const allText = n => [n.textContent || n.nodeText || '',
+                        ...(n.children || []).map(allText)].join(' ');
+  CURRENT_WS = WS_A;
+  await ctx.refreshWorkspace();
+  await ctx.document.getElementById('go-chapters').onclick();
+  await els['pick-drafts'].onclick();
+  check('the drafts area is opened for the chosen book, with no folder',
+        bodies['/api/drafts/open'] && bodies['/api/drafts/open'].book === 'book-a' &&
+        !els['step-chapter'].classList.contains('hidden') &&
+        els['vault-summary'].textContent.includes('drafts area') &&
+        els['vault-summary'].textContent.includes('example-org/book-a'),
+        els['vault-summary'].textContent);
+  await els['chapter-list'].children[0].children[0].onclick();
+  check('choosing a chapter says which book it is for',
+        bodies['/api/prepare'].book === 'book-a' &&
+        bodies['/api/prepare'].chapter === 'chapters/Only.md' &&
+        !els['step-options'].classList.contains('hidden'), bodies['/api/prepare']);
+  await els['start-analysis'].onclick();
+  await ctx.goPreview();
+  check('the preview says the changes go to the drafts area, not into files',
+        els['do-commit'].textContent === 'Send to drafts' &&
+        els['commit-warn-folder'].classList.contains('hidden') &&
+        !els['commit-warn-drafts'].classList.contains('hidden') &&
+        els['preview-file'].textContent.includes('drafts area of Book A'),
+        els['preview-file'].textContent);
+
+  commitReplies = [{ moved: true, same: true, head: 'd2',
+    message: 'Nothing was sent. Something else changed the drafts area. Your choices still stand.' }];
+  els['error-text'].textContent = '';
+  els['confirm-box'].checked = true;
+  await els['do-commit'].onclick();
+  check('sending says which book and which drafts it was shown',
+        bodies['/api/commit'].book === 'book-a' && bodies['/api/commit'].head === 'd1',
+        bodies['/api/commit']);
+  check('if drafts moved, nothing was sent, and the same choices are offered again',
+        els['error-text'].textContent.includes('Nothing was sent') &&
+        !els['step-preview'].classList.contains('hidden') &&
+        els['confirm-box'].checked === false, els['error-text'].textContent);
+
+  commitReplies = [{ sent: true, written: ['chapters/Only.md', 'glossary.md'],
+    counts: { references: 1, terms: 2, glossary: 1, expanded: 0 },
+    glossary_added: ['morphogenesis'], changed_lines: 2, repo: 'example-org/book-a',
+    branch: 'drafts', head: 'd3', url: 'https://example.invalid/c/d3' }];
+  els['confirm-box'].checked = true;
+  await els['do-commit'].onclick();
+  check('the second send goes on top of what drafts holds now',
+        bodies['/api/commit'].head === 'd2', bodies['/api/commit']);
+  check('once sent, the author is told it is in the drafts area, not a file',
+        !els['step-done'].classList.contains('hidden') &&
+        allText(els['done-summary']).includes('Sent to the drafts area of Book A') &&
+        !allText(els['done-summary']).includes('Obsidian'),
+        allText(els['done-summary']));
+
+  await els['chapter-list'].children[0].children[0].onclick();
+  await els['start-analysis'].onclick();
+  await ctx.goPreview();
+  commitReplies = [{ moved: true, same: false, head: 'd4',
+    message: 'Nothing was sent. Something else changed this chapter. Please go through it again.' }];
+  const preparesBefore = calls.filter(c => c === '/api/prepare').length;
+  els['confirm-box'].checked = true;
+  await els['do-commit'].onclick();
+  check('if the chapter itself changed on drafts, it is read again and gone through again',
+        calls.filter(c => c === '/api/prepare').length === preparesBefore + 1 &&
+        !els['step-options'].classList.contains('hidden') &&
+        els['error-text'].textContent.includes('go through it again'),
+        els['error-text'].textContent);
+
+  await els['download-copy'].onclick();
+  check('"Download a copy" says where the copy went and how much is in it',
+        bodies['/api/drafts/download'].book === 'book-a' &&
+        els['download-note'].textContent.includes('book-a (drafts, 2026-09-22)') &&
+        els['download-note'].textContent.includes('12 files'),
+        els['download-note'].textContent);
+
+  // --- a reader's suggestion, made in the drafts area -------------------------
+
+  CURRENT_WS = WS_A_VAULT;
+  await ctx.refreshWorkspace();
+  await ctx.openSuggestion({ number: 51, who: 'Ada', when: '2026-09-01T00:00:00Z',
+    page: 'chapter-01', suggestion: '"The the words" should be "The words"', reasoning: '' });
+  const planText = allText(els['sug-plan']);
+  els['sug-apply'] = find(els['sug-plan'], 'sug-apply');
+  els['sug-apply-vault'] = find(els['sug-plan'], 'sug-apply-vault');
+  check('the suggestion offers to make the change in the drafts area, and says the reply links it',
+        planText.includes('drafts area of Book A') && planText.includes('links to it') &&
+        els['sug-apply'] && els['sug-apply'].checked, planText);
+  check('with the book’s vault open, the vault is offered too, ticked while readers see Publish',
+        els['sug-apply-vault'] && els['sug-apply-vault'].checked &&
+        planText.includes('Vault A'), planText);
+
+  acceptReplies = [{ moved: true,
+    message: 'Nothing was changed, and the suggestion is still open.',
+    plan: Object.assign({}, PLAN, { head: 'h2' }) }];
+  els['error-text'].textContent = '';
+  await els['sug-accept'].onclick();
+  check('accepting sends both ticks and the drafts the plan was read at',
+        bodies['/api/console/accept'].apply === true &&
+        bodies['/api/console/accept'].apply_vault === true &&
+        bodies['/api/console/accept'].head === 'h1', bodies['/api/console/accept']);
+  check('if drafts moved, the author is told nothing changed and shown it again',
+        els['error-text'].textContent.includes('still open') &&
+        !els['step-suggestion'].classList.contains('hidden'), els['error-text'].textContent);
+  els['sug-apply'] = find(els['sug-plan'], 'sug-apply');
+  els['sug-apply-vault'] = find(els['sug-plan'], 'sug-apply-vault');
+  acceptReplies = [{ done: true, url: 'https://example.invalid/c/x', steps: [
+    'Line 3 was changed in the drafts area, as one change of its own.',
+    'A thank-you was sent, with a link to the change.',
+    'The suggestion was marked as dealt with.'] }];
+  await els['sug-accept'].onclick();
+  check('accepting again goes on the fresh offer',
+        bodies['/api/console/accept'].head === 'h2' &&
+        !els['step-console-done'].classList.contains('hidden'),
+        bodies['/api/console/accept']);
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

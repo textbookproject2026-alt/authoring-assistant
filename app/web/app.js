@@ -5,6 +5,8 @@ const TOKEN = document.body.dataset.token;
 
 const S = {
   sessionId: null,
+  mode: null,           // "file", "folder", or "drafts" for the book's drafts area
+  head: null,           // for "drafts": the drafts commit the chapter was read at
   root: null,
   chapters: [],
   chapter: null,
@@ -81,6 +83,8 @@ async function openTarget(path) {
   const data = await api('/api/open', { path });
   renderWorkspace(data.workspace);
   S.sessionId = data.session_id;
+  S.mode = data.mode;
+  S.head = null;
   S.root = data.root;
   S.chapters = data.chapters;
 
@@ -92,6 +96,48 @@ async function openTarget(path) {
   renderChapters('');
   show('step-chapter');
 }
+
+// A chapter as the chosen book's drafts area holds it. No folder is needed,
+// and what the author says yes to goes back there as one commit.
+document.getElementById('pick-drafts').onclick = async () => {
+  if (!bookSlug()) {
+    return fail('Choose a book first: press “Change book” at the top of the page.');
+  }
+  const note = document.getElementById('choose-note');
+  note.textContent = 'Reading the drafts area of ' + bookName() + '…';
+  try {
+    const data = await bookApi('/api/drafts/open', {});
+    note.textContent = '';
+    renderWorkspace(data.workspace);
+    S.sessionId = data.session_id;
+    S.mode = 'drafts';
+    S.head = data.head;
+    S.root = null;
+    S.chapters = data.chapters;
+    document.getElementById('vault-summary').textContent =
+      `${data.chapters.length} chapters in ${data.root_name} (${data.repo}, “${data.branch}”)`;
+    renderChapters('');
+    show('step-chapter');
+  } catch (e) { note.textContent = ''; fail(e.message); }
+};
+
+// "Download a copy": the book's files as the drafts area holds them, into a
+// new folder. Nothing on this Mac is written over.
+document.getElementById('download-copy').onclick = async () => {
+  if (!bookSlug()) {
+    return fail('Choose a book first: press “Change book” at the top of the page.');
+  }
+  const note = document.getElementById('download-note');
+  note.textContent = 'The chooser window is open — it may be behind this one.';
+  note.classList.remove('hidden');
+  try {
+    const r = await bookApi('/api/drafts/download', {});
+    if (r.cancelled) { note.classList.add('hidden'); return; }
+    if (r.error) { note.classList.add('hidden'); return fail(r.error); }
+    note.textContent = `A copy of ${bookName()} (${r.files} files, from “${r.branch}”) is in ` +
+      `${r.folder}.` + (r.left_out ? ` ${r.left_out} links were left out.` : '');
+  } catch (e) { note.classList.add('hidden'); fail(e.message); }
+};
 
 function renderChapters(filter) {
   const list = document.getElementById('chapter-list');
@@ -118,8 +164,9 @@ document.getElementById('chapter-filter').oninput = e => renderChapters(e.target
 
 async function chooseChapter(path) {
   try {
-    const info = await api('/api/prepare', { session_id: S.sessionId, chapter: path });
+    const info = await bookApi('/api/prepare', { session_id: S.sessionId, chapter: path });
     S.chapter = info;
+    if (info.mode === 'drafts') S.head = info.head;
     renderPreflight(info);
     show('step-options');
   } catch (e) { fail(e.message); }
@@ -335,8 +382,16 @@ function renderPreview(p, acceptedCount) {
       `${p.diff.length} line${p.diff.length === 1 ? '' : 's'} of your chapter will change. ` +
       `Every other line stays exactly as it is.`;
 
-  document.getElementById('preview-file').textContent =
-    S.chapter ? S.chapter.chapter : '';
+  const toDrafts = S.mode === 'drafts';
+  document.getElementById('preview-file').textContent = !S.chapter ? ''
+    : S.chapter.chapter + (toDrafts ? ' — in the drafts area of ' + bookName() : '');
+  document.getElementById('commit-warn-folder').classList.toggle('hidden', toDrafts);
+  document.getElementById('commit-warn-drafts').classList.toggle('hidden', !toDrafts);
+  document.getElementById('confirm-text').textContent = toDrafts
+    ? 'I have read the changes above and I want to send them to the drafts area.'
+    : 'I have read the changes above and I want to save them.';
+  document.getElementById('do-commit').textContent =
+    toDrafts ? 'Send to drafts' : 'Save these changes';
 
   const changes = document.getElementById('tab-changes');
   changes.innerHTML = '';
@@ -410,13 +465,28 @@ document.getElementById('do-commit').onclick = async () => {
   const accepted = Object.keys(S.decisions).filter(id => S.decisions[id]);
   document.getElementById('do-commit').disabled = true;
   show('step-working');
-  document.getElementById('working-note').textContent = 'Saving…';
+  document.getElementById('working-note').textContent =
+    S.mode === 'drafts' ? 'Sending to the drafts area…' : 'Saving…';
   try {
-    const r = await api('/api/commit', {
+    const r = await bookApi('/api/commit', {
       session_id: S.sessionId,
+      head: S.head,
       accepted,
       expand_groups: S.expandGroups,
     });
+    if (r.moved) {
+      // Nothing was sent. The drafts area has been read again: if this
+      // chapter is as it was, the same choices are offered on top of what is
+      // there now; if not, the chapter is gone through again.
+      S.head = r.head;
+      fail(r.message);
+      if (r.same) {
+        show('step-preview');
+        document.getElementById('confirm-box').checked = false;
+        return;
+      }
+      return chooseChapter(S.chapter.chapter);
+    }
     renderDone(r);
     show('step-done');
   } catch (e) {
@@ -439,9 +509,15 @@ function renderDone(r) {
   if (r.counts.terms) list.appendChild(el('li', '', `${r.counts.terms} mentions now link to your concept pages.`));
   if (r.glossary_added.length) list.appendChild(el('li', '', `Added to your glossary: ${r.glossary_added.join(', ')}.`));
   if (!r.written.length) list.appendChild(el('li', '', 'Nothing needed changing, so no files were touched.'));
+  document.querySelector('#step-done h2').textContent = r.sent ? 'Sent to drafts' : 'Saved';
 
   box.appendChild(list);
-  if (r.written.length) {
+  if (r.sent) {
+    S.head = r.head;
+    box.appendChild(el('p', 'quiet', `Sent to the drafts area of ${bookName()} ` +
+      `(${r.repo}, “${r.branch}”) as one change: ` + r.written.join('  •  ')));
+    box.appendChild(el('p', '', 'Readers don’t see the drafts area. It reaches them the next time the book goes live.'));
+  } else if (r.written.length) {
     const files = el('p', 'quiet', 'Files written: ' + r.written.join('  •  '));
     box.appendChild(files);
     box.appendChild(el('p', '', 'If Obsidian is open, it will pick up the changes on its own.'));
@@ -738,7 +814,7 @@ function renderDrafts(d) {
         `${d.changed_lines.removed === 1 ? '' : 's'} taken out, ${d.changed_lines.added} put in.`
       : ' Sending replaces it with this one.';
     detail = 'A chapter of this name is already in the drafts area.' + last + lines +
-      ' Anything in it that isn\'t in your Word document — an edit made in the ' +
+      ' Anything in it that isn\'t in your Word document — an edit published from the ' +
       'browser editor, say — is replaced too. It stays in the drafts area\'s history.';
   }
   if (d.nothing_to_send) detail = 'The drafts area already has exactly this chapter ' +
@@ -1105,12 +1181,13 @@ const C = {
 
 /* ---------- which book ---------- */
 /* Every queue, count and action in the console belongs to one book, and the
-   bar under the header always says which. When a vault is open it decides the
-   book, and the book cannot be changed without closing it first. Nothing about
-   a book is written here: its repository, branches and links all come from the
-   app, which takes them from the list of textbooks. */
+   bar under the header always says which. The book the author chooses decides
+   it, not an open vault: a vault is only this Mac's copy of the chosen book,
+   and choosing another book closes it. Nothing about a book is written here:
+   its repository, branches and links all come from the app, which takes them
+   from the list of textbooks. */
 
-let WS = { book: null, vault: null, locked: false, can_write_vault: false, registry: {} };
+let WS = { book: null, vault: null, can_write_vault: false, registry: {} };
 
 function bookSlug() { return WS.book ? WS.book.slug : null; }
 function bookName() { return WS.book ? WS.book.title : ''; }
@@ -1145,8 +1222,8 @@ function renderWorkspace(ws) {
   const vaultEl = document.getElementById('bookbar-vault');
   const v = ws.vault;
   vaultEl.textContent = v
-    ? (v.name + (ws.locked && ws.book ? ' — this vault decides the book' : ''))
-    : 'None open — chapters can’t be changed from “Waiting for you”';
+    ? v.name
+    : 'None open — not needed to work in the drafts area';
 
   const problem = document.getElementById('bookbar-problem');
   const vaultProblem = v && v.state !== 'ok' ? v.message : '';
@@ -1161,10 +1238,8 @@ function renderWorkspace(ws) {
   regEl.textContent = regText;
   regEl.classList.toggle('hidden', !regText);
 
-  // Changing book is always offered. With a vault open it closes the vault,
-  // since the vault decides the book, and goes straight to choosing another.
-  document.getElementById('bookbar-change').textContent =
-    v ? 'Change book (closes this vault)' : 'Change book';
+  // Changing book is always offered, vault or no vault.
+  document.getElementById('bookbar-change').textContent = 'Change book';
   document.getElementById('bookbar-close').classList.toggle('hidden', !v);
 
   renderAccount(ws.account);
@@ -1221,17 +1296,18 @@ async function openBookPicker() {
   const list = document.getElementById('books-list');
   const note = document.getElementById('books-note');
   const hidden = document.getElementById('books-hidden');
-  const locked = document.getElementById('books-locked');
+  const vaultCard = document.getElementById('books-vault');
   list.innerHTML = '';
   hidden.textContent = '';
   note.classList.add('hidden');
 
-  locked.classList.toggle('hidden', !WS.locked);
-  if (WS.locked) {
-    document.getElementById('books-locked-text').textContent = WS.book
-      ? ('The vault you have open, “' + WS.vault.name + '”, is ' + WS.book.title +
-         ', so that is the book you are working on. To work on a different book, close the vault first — the button below does that and lets you choose.')
-      : (WS.vault.message + ' Close the vault to choose a book instead.');
+  // The book chosen here decides. A vault open now is a copy of one book, so
+  // choosing a different one closes it; say so before, not after.
+  vaultCard.classList.toggle('hidden', !(WS.vault && WS.book && WS.can_write_vault));
+  if (WS.vault && WS.book && WS.can_write_vault) {
+    document.getElementById('books-vault-text').textContent =
+      '“' + WS.vault.name + '” is your copy of ' + WS.book.title +
+      '. Choosing a different book closes it.';
   }
 
   list.appendChild(el('li', 'none', 'Checking which books you can work on…'));
@@ -1252,7 +1328,6 @@ async function openBookPicker() {
     btn.appendChild(el('strong', '', b.title));
     btn.appendChild(el('span', 'who', b.repo + (b.status === 'preview' ? ' · not yet public' : '')));
     if (WS.book && WS.book.slug === b.slug) btn.appendChild(el('span', 'snip', 'The book you are working on now.'));
-    btn.disabled = WS.locked && !(WS.book && WS.book.slug === b.slug);
     btn.onclick = () => chooseBook(b.slug);
     li.appendChild(btn);
     list.appendChild(li);
@@ -1271,9 +1346,14 @@ async function openBookPicker() {
 }
 
 async function chooseBook(slug) {
+  const hadVault = !!WS.vault;
   try {
     renderWorkspace(await api('/api/books/choose', { slug }));
   } catch (e) { return fail(e.message); }
+  // A Word import on its way into a vault that closed went with it.
+  if (hadVault && !WS.vault) {
+    W.folder = null; W.converted = null; W.saved = null; W.sent = null; W.drafts = null;
+  }
   await loadConsole();
 }
 
@@ -1286,17 +1366,11 @@ async function closeVault() {
 }
 document.getElementById('bookbar-close').onclick = closeVault;
 
-// Work on a different book. The open vault decides the book, so it is closed
-// first, and the author goes straight to choosing another.
+// Work on a different book: straight to the list. Nothing closes until
+// another book is actually chosen.
 async function switchBook() {
-  if (WS.vault) {
-    try { renderWorkspace(await api('/api/books/switch', {})); } catch (e) { return fail(e.message); }
-    // An import on its way into the old vault was dropped with it.
-    W.folder = null; W.converted = null; W.saved = null; W.sent = null; W.drafts = null;
-  }
   await enterBookPicker();
 }
-document.getElementById('books-close-vault').onclick = switchBook;
 document.getElementById('books-switch-account').onclick = () => switchAccount('books');
 
 // Choosing a book needs to know who is asking, so it goes through sign-in.
@@ -1659,6 +1733,21 @@ function renderPlan() {
   const p = C.plan;
   box.innerHTML = '';
 
+  // The change goes to the chapter in the drafts area. While a vault of this
+  // book is open, it can go into the vault too: a book still published from
+  // the author's folder shows readers what is there.
+  const v = p.vault;
+  const vaultTick = (v && v.can_apply) ? (() => {
+    const lab = el('label', 'check confirm');
+    const cb = el('input');
+    cb.type = 'checkbox'; cb.id = 'sug-apply-vault'; cb.checked = !!v.suggested;
+    lab.appendChild(cb);
+    lab.appendChild(el('span', '',
+      'Also make it in my vault “' + v.name + '”' +
+      (v.suggested ? ' — readers of this book still see what is published from there.' : '.')));
+    return lab;
+  })() : null;
+
   if (p.can_apply) {
     const card = el('div', 'card after');
     card.appendChild(el('p', 'card-label',
@@ -1679,9 +1768,10 @@ function renderPlan() {
     cb.type = 'checkbox'; cb.id = 'sug-apply'; cb.checked = true;
     lab.appendChild(cb);
     lab.appendChild(el('span', '',
-      'Make this change to my chapter in “' + (WS.vault ? WS.vault.name : '') +
-      '” as well as replying.'));
+      'Make this change in the drafts area of ' + bookName() +
+      ' (“' + p.branch + '”) as well as replying. The reply links to it.'));
     card.appendChild(lab);
+    if (vaultTick) card.appendChild(vaultTick);
     box.appendChild(card);
     return;
   }
@@ -1689,9 +1779,9 @@ function renderPlan() {
   const card = el('div', 'card');
   card.appendChild(el('p', 'card-label', 'This one is for you to do'));
   card.appendChild(el('p', '', p.reason));
-  if (p.needs_vault) {
-    card.appendChild(el('p', 'quiet',
-      'Open the vault for ' + bookName() + ' at the bottom of the previous screen and the tool can check the wording for you.'));
+  if (vaultTick) {
+    card.appendChild(el('p', 'quiet', 'It can still be made in your vault:'));
+    card.appendChild(vaultTick);
   } else {
     card.appendChild(el('p', 'quiet',
       'Accepting sends a thank-you and clears it from this list. Make the change yourself under Chapters.'));
@@ -1709,10 +1799,21 @@ document.getElementById('sug-accept').onclick = async () => {
   if (!s) return;
   const cb = document.getElementById('sug-apply');
   const applyIt = !!(cb && cb.checked && C.plan && C.plan.can_apply);
+  const vcb = document.getElementById('sug-apply-vault');
+  const applyVault = !!(vcb && vcb.checked && C.plan && C.plan.vault && C.plan.vault.can_apply);
   const btn = document.getElementById('sug-accept');
   btn.disabled = true;
   try {
-    const r = await bookApi('/api/console/accept', { number: s.number, apply: applyIt });
+    const r = await bookApi('/api/console/accept', {
+      number: s.number, apply: applyIt, apply_vault: applyVault,
+      head: C.plan ? C.plan.head : null,
+    });
+    if (r.moved) {
+      // Nothing was changed or sent; here is the change as it would be now.
+      C.plan = r.plan;
+      renderPlan();
+      return fail(r.message);
+    }
     consoleDone('Accepted', r.steps);
   } catch (e) {
     fail(e.message);
@@ -1848,7 +1949,7 @@ function renderPublish(p) {
     card.appendChild(el('p', 'quiet', 'Written by ' + p.who.join(', ') + '.'));
   }
   card.appendChild(el('p', 'quiet',
-    'This is the whole of the drafts area, not only the last thing you accepted — anything written in the browser editor goes with it.'));
+    'This is the whole of the drafts area, not only the last thing you accepted — anything published from the browser editor goes with it.'));
   body.appendChild(card);
 
   const state = el('p', 'notice' + (p.state === 'conflict' ? ' bad' : ''));

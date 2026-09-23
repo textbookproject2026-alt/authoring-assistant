@@ -141,7 +141,14 @@ def existing_glossary_terms(glossary_path):
             text = fh.read()
     except OSError:
         return set()
+    return glossary_terms_in(text)
+
+
+def glossary_terms_in(text):
+    """The terms a glossary's text already has."""
     terms = set()
+    if not text:
+        return terms
     for m in re.finditer(r"^\s{0,3}#{2,4}\s+(.+?)\s*$", text, re.M):
         terms.add(_strip_markdown(m.group(1)).casefold())
     for m in re.finditer(r"^\s*[-*+]\s*\*\*(.+?)\*\*", text, re.M):
@@ -278,10 +285,17 @@ def plan_glossary(glossary_path, new_entries, source_name=""):
     Existing lines are copied through untouched; new entries are spliced into
     alphabetical position between them.
     """
-    exists = glossary_path and os.path.exists(glossary_path)
-    if exists:
+    original = None
+    if glossary_path and os.path.exists(glossary_path):
         with open(glossary_path, "r", encoding="utf-8", errors="replace") as fh:
             original = fh.read()
+    return plan_glossary_text(original, new_entries, source_name)
+
+
+def plan_glossary_text(original, new_entries, source_name=""):
+    """plan_glossary, for a glossary held as text. `original` is None when
+    there is no glossary yet."""
+    if original is not None:
         lines, newline, trailing = split_lines(original)
     else:
         original = ""

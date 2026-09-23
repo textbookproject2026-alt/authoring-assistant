@@ -8,6 +8,7 @@ keeps other programs and web pages on the machine from reaching it.
 
 import json
 import os
+import posixpath
 import secrets
 import socket
 import sys
@@ -18,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import (config, console, convert, drafts, github, keychain, llm,
                picker, registry)
-from .session import Session
+from .session import DraftsSession, Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
@@ -252,9 +253,9 @@ def r_open(handler, data):
             "folder that holds your .md chapter files."
         )
 
-    # Opening a chapter opens its vault for the whole app, and the vault
-    # decides the book. A vault that claims a book it can't be shown to be is
-    # refused here, before any work is done in it.
+    # Opening a chapter opens its vault for the whole app. A vault that claims
+    # a book it can't be shown to be, or is a copy of a book other than the one
+    # chosen, is refused here, before any work is done in it.
     ident = _open_vault(session.root)
 
     sid = secrets.token_urlsafe(12)
@@ -276,17 +277,23 @@ def r_open(handler, data):
 def r_prepare(handler, data):
     session = handler._session(data)
     chapter = data.get("chapter")
-    if not chapter or not os.path.isfile(chapter):
-        raise KeyError("That chapter could not be found. Please start again.")
-    session.load_chapter(chapter)
+    if session.mode == "drafts":
+        _drafts_session_book(session, data)
+        session.load_chapter(chapter)
+    else:
+        if not chapter or not os.path.isfile(chapter):
+            raise KeyError("That chapter could not be found. Please start again.")
+        session.load_chapter(chapter)
     warnings, blockers, wrapped = session.preflight(
         we_just_wrote_it=(chapter == IMPORT.get("last_saved"))
     )
-    from .terms import discover_concept_pages
-    pages, source = discover_concept_pages(session.root, chapter)
+    pages, source = session.concept_pages()
     return {
+        "mode": session.mode,
+        "head": session.snap["head"] if session.mode == "drafts" else None,
         "chapter": chapter,
-        "chapter_name": os.path.basename(chapter),
+        "chapter_name": posixpath.basename(chapter) if session.mode == "drafts"
+        else os.path.basename(chapter),
         "warnings": warnings,
         "blockers": blockers,
         "hard_wrapped": wrapped,
@@ -328,6 +335,8 @@ def r_preview(handler, data):
 
 def r_commit(handler, data):
     session = handler._session(data)
+    if session.mode == "drafts":
+        return _send_tidy(session, data)
     _guard_vault_write(session.chapter_path, session.glossary_path)
     result = session.commit(data.get("accepted", []), data.get("expand_groups", []))
     return result
@@ -340,6 +349,158 @@ def r_savekey(handler, data):
     where = llm.save_key(key)
     return {"saved": True, "where": where, "hint": llm.key_hint(),
             "deepseek": llm.have_key()}
+
+
+# --- a chapter in the drafts area --------------------------------------------
+#
+# The same three analyses, on a chapter as the chosen book's drafts area holds
+# it, with no folder on this Mac needed. What the author says yes to goes back
+# as one commit on the drafts branch, made as the signed-in author, on top of
+# the drafts branch exactly as it was read (drafts.py). Only the chapter and
+# its glossary.md are sent, and in them only the lines that changed.
+
+def _drafts_book(data, doing):
+    """(token, book) for work in the chosen book's drafts area.
+
+    An account that can't push to the book is told so here, before any work
+    is done, rather than at the end. `doing` finishes the sentence.
+    """
+    token = _token()
+    if not token:
+        _needs_signin()
+    book = _book_for(data)
+    level = _known_access(book.slug)
+    if level is None:
+        if _ensure_login(token) is None:
+            _check_access(token, [book])
+        level = _known_access(book.slug)
+    if level in ("read", "none"):
+        who = f" ({CONSOLE['login']})" if CONSOLE["login"] else ""
+        raise KeyError(
+            f"Your account{who} can't make changes to “{book.title}” "
+            f"({book.repo}), so {doing} The book's maintainer can give you "
+            "access, or you can sign in with a different account.")
+    return token, book
+
+
+def _blob_reader(book):
+    def read(sha):
+        return _unwrap(github.blob_bytes(_token(), book, sha))
+    return read
+
+
+def _drafts_session_book(session, data):
+    """The chosen book, and only if it is the book this chapter came from."""
+    book = _book_for(data)
+    if book.slug != session.book:
+        raise KeyError(
+            "This chapter was opened from the drafts area of a different book "
+            f"from “{book.title}”, the one chosen now. Nothing was done. "
+            "Please open it again.")
+    return book
+
+
+def r_drafts_open(handler, data):
+    """The chapters in the chosen book's drafts area. Reads; changes nothing."""
+    token, book = _drafts_book(
+        data, "its drafts area can't be worked on here. Nothing was opened.")
+    snap = _unwrap(drafts.snapshot(token, book))
+    session = DraftsSession(book.slug, snap, _blob_reader(book))
+    chapters = session.chapters()
+    if not chapters:
+        raise KeyError(f"The drafts area of “{book.title}” has no chapters in "
+                       "it yet.")
+    sid = secrets.token_urlsafe(12)
+    with LOCK:
+        SESSIONS[sid] = session
+    return {
+        "workspace": _workspace_info(),
+        "session_id": sid,
+        "mode": "drafts",
+        "root": None,
+        "root_name": f"the drafts area of “{book.title}”",
+        "repo": book.repo,
+        "branch": book.drafts_branch,
+        "head": snap["head"],
+        "chapters": chapters,
+    }
+
+
+def _tidy_message(session, preview):
+    counts = preview["counts"]
+    what = []
+    if counts["references"]:
+        what.append("citations")
+    if counts["terms"] or counts["expanded"]:
+        what.append("concept links")
+    if counts["glossary"]:
+        what.append("glossary")
+    return (f"Tidy {posixpath.basename(session.chapter_path)}: "
+            f"{', '.join(what) or 'links'}\n\n"
+            "Made with the Authoring Assistant.")
+
+
+def _send_tidy(session, data):
+    """One commit on the drafts branch, or a refusal that changed nothing."""
+    token = _token()
+    if not token:
+        _needs_signin()
+    book = _drafts_session_book(session, data)
+    _require_write(book)
+    if data.get("head") != session.snap["head"]:
+        raise KeyError("This screen is out of date, so nothing was sent. "
+                       "Please look at the changes again.")
+    preview, files = session.changes(data.get("accepted", []),
+                                     data.get("expand_groups", []))
+    entries = drafts.edit_entries(session.snap, files)
+    out = {
+        "sent": False,
+        "written": [e["path"] for e in entries],
+        "counts": preview["counts"],
+        "glossary_added": preview["glossary_added"],
+        "changed_lines": len(preview["changed_lines"]),
+        "repo": book.repo,
+        "branch": book.drafts_branch,
+    }
+    if not entries:
+        return out
+
+    sent = drafts.send(token, book, session.snap, entries,
+                       _tidy_message(session, preview))
+    if isinstance(sent, dict) and sent.get("moved"):
+        same = session.reload(_unwrap(drafts.snapshot(token, book)))
+        return {"moved": True, "same": same, "head": session.snap["head"],
+                "message": (drafts.MOVED_EDIT_SAME if same
+                            else drafts.MOVED_EDIT_CHANGED)}
+    sent = _unwrap(sent)
+    # Read again, so a second run on this chapter starts from what was sent.
+    fresh = drafts.snapshot(token, book)
+    if not isinstance(fresh, github.Problem):
+        session.reload(fresh)
+    out.update(sent=True, sha=sent["sha"], url=sent.get("url"),
+               head=session.snap["head"])
+    return out
+
+
+def r_drafts_download(handler, data):
+    """"Download a copy": every file on the chosen book's drafts branch, into a
+    new folder on this Mac. Nothing already on the Mac is written over."""
+    book = _book_for(data)
+    path, err = picker.choose_folder(
+        f"Choose where to put a copy of “{book.title}”",
+        os.path.expanduser("~"))
+    if err:
+        return {"error": err}
+    if not path:
+        return {"cancelled": True}
+    archive = _unwrap(github.drafts_archive(_token(), book))
+    name = f"{book.slug} (drafts, {time.strftime('%Y-%m-%d')})"
+    try:
+        copy = drafts.unpack_copy(archive, path, name)
+    except drafts.CopyError as e:
+        raise KeyError(str(e))
+    copy.update(repo=book.repo, branch=book.drafts_branch)
+    return copy
 
 
 # --- bringing a Word document in ---------------------------------------------
@@ -553,8 +714,8 @@ def r_import_cancel(handler, data):
 # The same converted chapter can be saved into the folder, sent to the book's
 # drafts area, or both. Sending is one commit on the drafts branch, made as the
 # signed-in author, on top of the drafts branch exactly as the author was shown
-# it (drafts.py). Only the book the open vault is, checked again at the moment
-# of sending, is ever written to.
+# it (drafts.py). The import is converted into a vault, so only the chosen
+# book, and only if the open vault is still its copy when sending, is written to.
 
 def _drafts_availability():
     """Whether this import can go to a drafts area. (True/False, why, words).
@@ -737,14 +898,15 @@ def r_quit(handler, data):
 # --- which book, and which vault ---------------------------------------------
 #
 # Everything the console shows or does belongs to one book, and the author is
-# never left to wonder which. There is one vault open at a time for the whole
-# app, whichever half opened it, and when a vault is open IT decides the book:
-# the book picker follows it and cannot be moved away from it. With no vault
-# open the author picks a book from the list of books they can act on, and can
-# read and reply, but not change a chapter.
+# never left to wonder which. The author chooses it from the books they can act
+# on, and that choice decides (BOOK-ONE-TO-QUARTZ §8 step 2): chapters are
+# changed in the book's drafts area, so no vault is needed. There is at most
+# one vault open for the whole app, whichever half opened it, and it can only
+# be the chosen book's copy: a vault of another book is refused on opening, and
+# choosing another book closes it.
 #
-# The picker being locked is what makes the dangerous mix — a suggestion for
-# one book written into another book's chapter — impossible to reach through the
+# That rule is what makes the dangerous mix — a suggestion for one book
+# written into another book's chapter — impossible to reach through the
 # interface. It is not what makes it impossible. That is done at the moment of
 # writing, by reading the vault's identity from disk again and refusing unless
 # it is still the book the text came from (see _guard_book_write). A screen
@@ -806,20 +968,29 @@ def _restore_last_book():
 
 
 def _open_vault(path):
-    """Make this the app's vault, and let it decide the book.
+    """Make this the app's vault. The chosen book decides the book, not it.
 
     Refuses — raises KeyError, and changes nothing — when the vault names a
-    book and that claim does not hold up. Returns the vault's identity.
+    book and that claim does not hold up, or when it is a copy of a book other
+    than the one chosen. With no book chosen, a vault that is a copy of a book
+    chooses it. A folder that isn't linked to a book opens for the Chapters
+    tools and leaves the book as it was. Returns the vault's identity.
     """
     ident = registry.identify(registry.vault_root(path))
     if ident["state"] in registry.FAILED_CLAIMS:
         raise KeyError(ident["message"])
-    WORKSPACE["restored"] = True
+    _restore_last_book()
+    book = _current_book()
+    if ident["state"] == registry.OK:
+        if book is None:
+            _set_book(ident["book"].slug)
+        elif book.slug != ident["book"].slug:
+            raise KeyError(
+                f"“{ident['name']}” is a copy of “{ident['book'].title}”, but "
+                f"the book you are working on is “{book.title}”, and the book "
+                "you choose decides. Nothing was opened. Change book first if "
+                f"you meant to work on “{ident['book'].title}”.")
     WORKSPACE["vault"] = ident
-    # A vault always decides: a linked vault sets its book, and a vault that
-    # isn't linked (or can't be checked) leaves no book chosen at all, so the
-    # console cannot show one book beside another book's vault.
-    _set_book(ident["book"].slug if ident["book"] else None)
     CONSOLE["plans"].clear()
     return ident
 
@@ -861,8 +1032,6 @@ def _workspace_info():
         "account": _account_info(),
         "book": info,
         "vault": _vault_info(ident),
-        # With a vault open, the vault decides the book.
-        "locked": ident is not None,
         # Whether the console may change a chapter in the open vault.
         "can_write_vault": bool(ident and book and ident["state"] == registry.OK
                                 and ident["book"].slug == book.slug),
@@ -950,16 +1119,15 @@ def r_vault_close(handler, data):
     return _workspace_info()
 
 
-def r_books_switch(handler, data):
-    """Work on a different book: close the vault, which decides the book, so
-    another can be chosen. A Word import on its way into that vault is
-    dropped, since it was going into the book being left."""
+def _leave_vault():
+    """Close the vault because another book was chosen. A Word import on its
+    way into it is dropped, since it was going into the book being left."""
     ident = WORKSPACE["vault"]
     if ident is not None and IMPORT["folder"] and \
             registry.within(ident["root"], IMPORT["folder"]):
         _forget_import()
         IMPORT["folder"] = None
-    return r_vault_close(handler, data)
+    WORKSPACE["vault"] = None
 
 
 def _known_access(slug):
@@ -1058,15 +1226,12 @@ def r_books(handler, data):
 
 
 def r_books_choose(handler, data):
+    """Choose the book. This, not an open vault, decides which book it is.
+
+    A vault that is a copy of a different book is closed, since nothing in it
+    belongs to the book chosen. A folder linked to no book stays open.
+    """
     slug = (data.get("slug") or "").strip()
-    ident = WORKSPACE["vault"]
-    if ident is not None:
-        if ident["book"] is not None and ident["book"].slug == slug:
-            return _workspace_info()
-        raise KeyError(
-            f"The vault you have open, “{ident['name']}”, decides which book you "
-            "are working on. Close the vault first to choose a different book."
-        )
     try:
         book = registry.get().resolve(slug)
     except registry.RegistryError as e:
@@ -1076,6 +1241,9 @@ def r_books_choose(handler, data):
             f"Your account can't make changes to “{book.title}” ({book.repo}), "
             "so it can't be chosen here."
         )
+    ident = WORKSPACE["vault"]
+    if ident is not None and ident["slug"] and ident["slug"] != book.slug:
+        _leave_vault()
     _set_book(book.slug)
     return _workspace_info()
 
@@ -1365,42 +1533,92 @@ def r_console_load(handler, data):
     return out
 
 
-def r_console_plan(handler, data):
-    """Work out, without changing anything, what accepting would do.
-
-    The suggestion's page and wording are the ones this app fetched for this
-    book, not whatever the page sends back.
-    """
-    book = _book_for(data)
-    number = str(data.get("number"))
+def _loaded_suggestion(book, number):
+    """The suggestion as this app fetched it for this book, never as the page
+    sends it back."""
     loaded = CONSOLE["loaded"] or {}
-    suggestion = (loaded.get("suggestions") or {}).get(number)
+    suggestion = (loaded.get("suggestions") or {}).get(str(number))
     if loaded.get("slug") != book.slug or suggestion is None:
         raise KeyError("That suggestion isn't in the list any more. Press "
                        "“Check again”.")
+    return suggestion
 
+
+def _plan_on_drafts(token, book, suggestion):
+    """What accepting would change in the chapter as the drafts area holds it.
+
+    The page is named by whoever filed the suggestion, so a name that isn't a
+    plain path inside the book is never followed.
+    """
+    path = suggestion["path"]
+    text, snap, problem = None, None, None
+    if console.literal_replacement(suggestion["suggestion"] or ""):
+        snap = drafts.snapshot(token, book) if token else github.Problem(
+            "You aren't signed in.")
+        if isinstance(snap, github.Problem):
+            snap, problem = None, snap
+        elif drafts.safe_path(path) and path in snap["files"]:
+            data = github.blob_bytes(token, book, snap["files"][path])
+            if isinstance(data, github.Problem):
+                snap, problem = None, data
+            else:
+                text = drafts.text_of(data)
+    plan = console.plan_in_text(text, path, suggestion["suggestion"])
+    if problem is not None:
+        plan["reason"] = ("The drafts area couldn't be read just now, so the "
+                          "tool can't make this change there: " + problem.message)
+    elif snap is not None and not drafts.safe_path(path):
+        plan["reason"] = ("This suggestion names a page outside the book, so "
+                          "the tool will not touch it.")
+    plan.update(book=book.slug, path=path, snap=snap,
+                head=snap["head"] if snap else None)
+    return plan
+
+
+def _shown_plan(book, plan):
+    """What the page is told about a plan."""
+    vault = plan.get("vault_plan")
     ident = WORKSPACE["vault"]
-    info = _workspace_info()
-    if ident is not None and not info["can_write_vault"]:
-        plan = console.plan_change(None, suggestion["path"],
-                                   suggestion["suggestion"])
-        plan["reason"] = ident["message"] or (
-            f"The vault that is open isn't “{book.title}”, so the tool will not "
-            "change it.")
-    else:
-        root = ident["root"] if ident else None
-        plan = console.plan_change(root, suggestion["path"],
-                                   suggestion["suggestion"])
-    plan["book"] = book.slug
-    CONSOLE["plans"][(book.slug, number)] = plan
     return {
         "can_apply": plan["can_apply"],
         "reason": plan["reason"],
         "line_no": plan["line_no"],
         "before": plan["before"],
         "after": plan["after"],
-        "needs_vault": ident is None,
+        "head": plan["head"],
+        "branch": book.drafts_branch,
+        "vault": None if vault is None else {
+            "name": ident["name"] if ident else "",
+            "can_apply": vault["can_apply"],
+            "reason": vault["reason"],
+            # Ticked to start with while readers see what is published from
+            # the author's folder.
+            "suggested": book.from_folder,
+        },
     }
+
+
+def r_console_plan(handler, data):
+    """Work out, without changing anything, what accepting would do.
+
+    The change goes to the chapter in the drafts area, whether or not a vault
+    is open. While a vault of this book is open, the same change can be made
+    in it too: until the book moves (BOOK-ONE-TO-QUARTZ §8 step 16) a book
+    still published from the author's folder shows readers what is there.
+    """
+    book = _book_for(data)
+    number = str(data.get("number"))
+    suggestion = _loaded_suggestion(book, number)
+
+    plan = _plan_on_drafts(_token(), book, suggestion)
+    ident = WORKSPACE["vault"]
+    if ident is not None and _workspace_info()["can_write_vault"]:
+        vault = console.plan_change(ident["root"], suggestion["path"],
+                                    suggestion["suggestion"])
+        vault["book"] = book.slug
+        plan["vault_plan"] = vault
+    CONSOLE["plans"][(book.slug, number)] = plan
+    return _shown_plan(book, plan)
 
 
 def r_console_accept(handler, data):
@@ -1418,25 +1636,63 @@ def r_console_accept(handler, data):
 
     number = data.get("number")
     apply_it = bool(data.get("apply"))
+    apply_vault = bool(data.get("apply_vault"))
     steps = []
+    sent = None
+
+    plan = CONSOLE["plans"].get((book.slug, str(number)))
+    if (apply_it or apply_vault) and not plan:
+        raise KeyError("Please look at the change again before accepting it.")
+    vault_plan = plan.get("vault_plan") if plan else None
+    if apply_vault:
+        if not vault_plan:
+            raise KeyError("Please look at the change again before accepting it.")
+        _guard_book_write(book, vault_plan)
 
     if apply_it:
-        plan = CONSOLE["plans"].get((book.slug, str(number)))
-        if not plan:
-            raise KeyError("Please look at the change again before accepting it.")
-        _guard_book_write(book, plan)
-        ok, message = console.apply_change(plan)
-        if not ok:
-            raise KeyError(message)
-        steps.append(message)
+        if data.get("head") != plan["head"]:
+            raise KeyError("This screen is out of date, so nothing was done. "
+                           "Please look at the suggestion again.")
+        new_text, why = console.change_text(plan)
+        if new_text is None:
+            raise KeyError(why)
+        entries = drafts.edit_entries(
+            plan["snap"], {plan["path"]: new_text.encode("utf-8")})
+        suggestion = _loaded_suggestion(book, number)
+        message = (f"Accept suggestion #{number} on {console._page_name(plan['path'])}"
+                   f"\n\nSuggested by {suggestion['who']} in #{number}. Made "
+                   "with the Authoring Assistant.")
+        sent = drafts.send(token, book, plan["snap"], entries, message)
+        if isinstance(sent, dict) and sent.get("moved"):
+            fresh = _plan_on_drafts(token, book, suggestion)
+            fresh["vault_plan"] = vault_plan
+            CONSOLE["plans"][(book.slug, str(number))] = fresh
+            return {"moved": True, "message": drafts.MOVED_SUGGESTION,
+                    "plan": _shown_plan(book, fresh)}
+        sent = _unwrap(sent)
+        steps.append(f"Line {plan['line_no']} was changed in the drafts area, "
+                     "as one change of its own.")
 
-    replied = github.comment(token, book, number, console.THANKS)
+    if apply_vault:
+        ok, message = console.apply_change(vault_plan)
+        if not ok:
+            raise RuntimeError(
+                ("The chapter was changed in the drafts area, but not in your "
+                 "vault: " if sent else "") + message +
+                " The suggestion is still open.")
+        steps.append(message.replace("was updated", "was updated in your vault"))
+
+    changed = bool(sent or apply_vault)
+    thanks = console.thanks_with_change(sent.get("url")) \
+        if sent and sent.get("url") else console.THANKS
+    replied = github.comment(token, book, number, thanks)
     if isinstance(replied, github.Problem):
         raise RuntimeError(
-            (("The chapter was updated. " if apply_it else "") +
+            (("The chapter was updated. " if changed else "") +
              "The thank-you could not be sent: " + replied.message)
         )
-    steps.append("A thank-you was sent.")
+    steps.append("A thank-you was sent, with a link to the change."
+                 if sent else "A thank-you was sent.")
 
     github.drop_label(token, book, number, console.NEEDS_TRIAGE)
 
@@ -1448,7 +1704,11 @@ def r_console_accept(handler, data):
         )
     steps.append("The suggestion was marked as dealt with.")
     CONSOLE["plans"].pop((book.slug, str(number)), None)
-    return {"done": True, "steps": steps}
+    out = {"done": True, "steps": steps}
+    if sent:
+        out.update(sha=sent["sha"], url=sent.get("url"),
+                   branch=book.drafts_branch)
+    return out
 
 
 def r_console_decline(handler, data):
@@ -1484,7 +1744,7 @@ def r_console_decline(handler, data):
 # carries them.
 #
 # It stops there deliberately. It does not merge that request itself. The drafts
-# area is shared: it holds whatever has been written in the browser editor as
+# area is shared: it holds whatever has been published from the browser editor as
 # well as whatever has been accepted here, so merging it would publish other
 # people's unreviewed work on the strength of one press about one change. The
 # live book is also protected and has checks of its own, and the author's vault
@@ -1528,7 +1788,7 @@ def _publish_state(token, book, tries=1):
         }, None
 
     state = github.mergeability(token, book, existing.get("number"), tries=tries)
-    info = console.describe_publish(existing, compare, state)
+    info = console.describe_publish(existing, compare, state, book)
     info["open"] = True
     info["waiting"] = False
     return info, None
@@ -1540,7 +1800,7 @@ def _open_or_refresh_publish_request(token, book):
 
     There is only ever one, and its description is rewritten rather than added
     to, because what it carries is the drafts area as it stands — including
-    anything written in the browser editor — and not the change just accepted.
+    anything published from the browser editor — and not the change just accepted.
     """
     compare = github.drafts_ahead_of_live(token, book)
     if isinstance(compare, github.Problem):
@@ -1577,7 +1837,7 @@ def _open_or_refresh_publish_request(token, book):
     # Just opened or just changed, so the answer is not ready yet; wait a little
     # rather than report "not known" when a moment would settle it.
     state = github.mergeability(token, book, pr.get("number"), tries=4)
-    info = console.describe_publish(pr, compare, state)
+    info = console.describe_publish(pr, compare, state, book)
     info["open"] = True
     info["waiting"] = False
     info["opened"] = opened
@@ -1714,7 +1974,7 @@ def r_console_publish(handler, data):
             "not have been. Press “Check again” and look before trying once "
             "more."
         )
-    return {"done": True, "steps": list(console.PUBLISHED_STEPS)}
+    return {"done": True, "steps": console.published_steps(book)}
 
 
 def r_console_draft_decline(handler, data):
@@ -1742,6 +2002,8 @@ ROUTES = {
     "/api/analyse": r_analyse,
     "/api/preview": r_preview,
     "/api/commit": r_commit,
+    "/api/drafts/open": r_drafts_open,
+    "/api/drafts/download": r_drafts_download,
     "/api/save-key": r_savekey,
     "/api/quit": r_quit,
 
@@ -1760,7 +2022,6 @@ ROUTES = {
     "/api/vault/close": r_vault_close,
     "/api/books": r_books,
     "/api/books/choose": r_books_choose,
-    "/api/books/switch": r_books_switch,
     "/api/account": r_account,
 
     "/api/console/status": r_console_status,

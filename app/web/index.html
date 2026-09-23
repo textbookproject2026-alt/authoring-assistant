@@ -90,8 +90,15 @@
       <strong>A Word document</strong>
       <span>Turn a .docx into a chapter in your vault</span>
     </button>
+    <button class="big" id="pick-drafts">
+      <strong>A chapter in the drafts area</strong>
+      <span>Work on the chosen book as the drafts area holds it — no folder needed</span>
+    </button>
   </div>
   <p class="note" id="choose-note"></p>
+  <p class="quiet"><button class="link inline" id="download-copy">Download a copy</button>
+    of the chosen book's drafts area into a new folder on this Mac.</p>
+  <p class="notice hidden" id="download-note"></p>
   <p class="quiet">You will be asked again each time you run the tool. Nothing is
   remembered between runs.</p>
 </section>
@@ -225,13 +232,22 @@
 
   <div class="warnbox">
     <h3>Please read this before you continue</h3>
+    <div id="commit-warn-folder">
     <p>When you press the button below, these changes are written straight into
     your files, replacing what is there now.</p>
     <p><strong>There is no undo.</strong> The tool cannot put your chapter back
     the way it was. If you are not certain, press “Go back” and look again, or
     make a copy of the file in Finder first.</p>
+    </div>
+    <div id="commit-warn-drafts" class="hidden">
+    <p>When you press the button below, these changes go to the drafts area as
+    one change of their own, made as you. Readers don't see the drafts area
+    until the book next goes live.</p>
+    <p>Only the lines shown above change. If anything else changed the drafts
+    area while you were looking, nothing is sent and you are shown it again.</p>
+    </div>
     <label class="check confirm"><input type="checkbox" id="confirm-box">
-      <span>I have read the changes above and I want to save them.</span></label>
+      <span id="confirm-text">I have read the changes above and I want to save them.</span></label>
   </div>
 
   <div class="actions">
@@ -469,12 +485,9 @@
   <p>Everything under “Waiting for you” belongs to one book at a time. These are
   the books your account can make changes to.</p>
 
-  <div id="books-locked" class="card hidden">
-    <p class="card-label">Your vault decides</p>
-    <p id="books-locked-text"></p>
-    <div class="actions tight">
-      <button id="books-close-vault">Close the vault and choose another book</button>
-    </div>
+  <div id="books-vault" class="card hidden">
+    <p class="card-label">Your vault</p>
+    <p id="books-vault-text"></p>
   </div>
 
   <p class="notice hidden" id="books-note"></p>
@@ -520,7 +533,7 @@
   <div id="publish-block" class="hidden">
     <h3>Going live <span class="count" id="publish-count"></span></h3>
     <p class="quiet">Everything you have accepted, together with anything
-    written in the browser editor, gathered in one place. It goes to readers
+    published from the browser editor, gathered in one place. It goes to readers
     when you send it, and not before.</p>
     <ul class="queue" id="publish-list"></ul>
   </div>

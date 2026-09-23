@@ -73,6 +73,16 @@ class Book:
         self.live_branch = content["live_branch"]
         self.drafts_branch = content["drafts_branch"]
         self.domain = site.get("domain")
+        host = site.get("host")
+        # How readers are served: "obsidian-publish" while a book is still on
+        # Publish, which uploads from the author's own folder. Anything else is
+        # built from the repository.
+        self.host_kind = host.get("kind") if isinstance(host, dict) else None
+
+    @property
+    def from_folder(self):
+        """True while readers see what is published from the author's folder."""
+        return self.host_kind == "obsidian-publish"
 
     @property
     def origin(self):
@@ -105,6 +115,7 @@ class Book:
             "site": self.origin,
             "discussion_url": self.discussion_url,
             "history_url": self.history_url,
+            "from_folder": self.from_folder,
         }
 
     def __repr__(self):
