@@ -2596,6 +2596,213 @@ check("accepting with both makes the change on drafts and in the vault",
 _server.r_vault_close(None, {})
 shutil.rmtree(_sv, ignore_errors=True)
 
+# --- the one rule for closing a suggestion ------------------------------------
+#
+# Found in the live proof on book two: a suggestion written as a comment rather
+# than an exact replacement was accepted with no vault open, nothing was
+# committed anywhere, and the reader was told "the chapter has been updated".
+# The reader is told the chapter changed only when a commit holds the change,
+# and then the reply links it.
+
+_BB = {"book": "book-b"}
+_LIVE_BODY = (
+    "**File:** [`content/chapter-1.md`](https://example.invalid/f)\n\n"
+    "### Suggested edit\n\n```text\nblaaaa\n```\n\n---\n\n"
+    "**Submitted by:** `A Reader` (`a***@example.com`)\n\n"
+    "_submitted via the suggest-an-edit form_")
+_CH1 = "# One\n\nThe the words are here.\n"
+
+
+def _book_b_repo():
+    repo = _GitRepo("example-org/book-b", {"content/chapter-1.md": _CH1})
+    root = repo.branches["main"]
+    repo.branches = {"published": root, "staging": root}
+    repo.issues = {"example-org/book-b": [
+        dict(_ISSUE, number=61, title="Suggested edit: content/chapter-1.md",
+             repository_url=f"{_github.API}/repos/example-org/book-b",
+             body=_LIVE_BODY),
+        dict(_ISSUE, number=62, title="Suggested edit: content/chapter-1.md",
+             repository_url=f"{_github.API}/repos/example-org/book-b",
+             body=_LIVE_BODY.replace("blaaaa", '"The the words" should be "The words"'))]}
+    return repo
+
+
+def _replies(repo, number):
+    return [c[2]["body"] for c in repo.calls
+            if c[0] == "POST" and c[1].endswith(f"/issues/{number}/comments")]
+
+
+def _closes(repo, number):
+    return [c for c in repo.calls
+            if c[0] == "PATCH" and c[1].endswith(f"/issues/{number}")]
+
+
+check("book two is not on Publish",
+      not _BOOK_B.from_folder and _BOOK_B.drafts_branch == "staging")
+_on_book(_BOOK_B)
+_server.WORKSPACE["vault"] = None
+_rb = _book_b_repo()
+_commits_before = set(_rb.commits)
+_branches_before = dict(_rb.branches)
+_with_service(_rb, lambda: _server.r_console_load(None, dict(_BB)))
+_pl = _with_service(_rb, lambda: _server.r_console_plan(None, dict(_BB, number=61)))
+check("a suggestion not written as an exact replacement can't be made by the tool",
+      not _pl["can_apply"] and _pl["vault"] is None
+      and "exact replacement" in _pl["reason"], _pl)
+check("and asking the tool to make it anyway is refused, with nothing sent",
+      _refused(lambda: _with_service(_rb, lambda: _server.r_console_accept(
+          None, dict(_BB, number=61, apply=True, head=_pl["head"])))) is not None
+      and not _replies(_rb, 61) and not _closes(_rb, 61))
+_ac = _with_service(_rb, lambda: _server.r_console_accept(
+    None, dict(_BB, number=61, head=_pl["head"])))
+_said = _replies(_rb, 61)
+check("accepting it with no vault open, on a book not on Publish, commits nothing",
+      set(_rb.commits) == _commits_before and _rb.branches == _branches_before,
+      _rb.branches)
+check("so the reader is not told the chapter was updated",
+      len(_said) == 1 and "has been updated" not in _said[0]
+      and not _console.claims_change(_said[0]), _said)
+check("they are told honestly that it will be made by hand",
+      _said == [_console.TAKEN_ON] and "hasn't been changed" in _said[0], _said)
+check("and the author is told the chapter itself was not changed",
+      any("was not changed" in t for t in _ac["steps"]) and "url" not in _ac,
+      _ac["steps"])
+check("the suggestion is then closed, once", len(_closes(_rb, 61)) == 1)
+
+_pl = _with_service(_rb, lambda: _server.r_console_plan(None, dict(_BB, number=62)))
+_ac = _with_service(_rb, lambda: _server.r_console_accept(
+    None, dict(_BB, number=62, apply=True, head=_pl["head"])))
+_said = _replies(_rb, 62)
+_made = _rb.branches["staging"]
+check("an exact replacement on book two becomes one commit on its drafts branch",
+      _pl["can_apply"] and _rb.commits[_made]["parents"] == [_branches_before["staging"]]
+      and _rb.files("staging")["content/chapter-1.md"] == b"# One\n\nThe words are here.\n"
+      and _rb.branches["published"] == _branches_before["published"])
+check("and only then is the reader told it changed, with a link to that commit",
+      len(_said) == 1 and _console.claims_change(_said[0])
+      and f"https://example.invalid/commit/{_made}" in _said[0]
+      and _ac["url"] in _said[0] and len(_closes(_rb, 62)) == 1, _said)
+
+# The rule, held by the one door every close goes through.
+_gate = _Service()
+check("a reply claiming a change with no commit to link is never sent",
+      "still open" in (_with_service(_gate, lambda: _refused(
+          lambda: _server._reply_and_close(
+              "a-token", _BOOK_B, 70,
+              "Thank you — the chapter has been updated."))) or "")
+      and _gate.calls == [])
+check("nor one that names a commit it doesn't link",
+      _with_service(_gate, lambda: _refused(
+          lambda: _server._reply_and_close(
+              "a-token", _BOOK_B, 70, "The chapter was changed.",
+              "https://example.invalid/commit/abc"))) is not None
+      and _gate.calls == [])
+check("the old wording would have been caught",
+      _console.claims_change("Thank you for this — it has been taken on board "
+                             "and the chapter has been updated."))
+check("the honest replies claim nothing",
+      not any(_console.claims_change(t) for t in
+              (_console.TAKEN_ON, _console.IN_VAULT, _console.DECLINED)))
+check("a thank-you for a change can't be worded without its link",
+      _refused(lambda: _console.thanks_with_change(""), ValueError) is not None)
+check("a commit is linked even when the service doesn't say where it is",
+      _github.commit_page(_BOOK_B, "abc123")
+      == "https://github.com/example-org/book-b/commit/abc123"
+      and _console.reply_on_accept("", vault_changed=True) == _console.IN_VAULT)
+_srv_src = open(_server.__file__, encoding="utf-8").read()
+_closers = [m.start() for m in re.finditer(r"github\.close_issue\(", _srv_src)]
+_gate_at = _srv_src.index("def _reply_and_close(")
+_gate_end = _srv_src.index("\ndef ", _gate_at + 1)
+check("every suggestion is closed through that one door",
+      len(_closers) == 1 and _gate_at < _closers[0] < _gate_end
+      and "github.comment(" not in _srv_src[:_gate_at] + _srv_src[_gate_end:],
+      _closers)
+check("no reply that says the chapter was updated is left in the app",
+      not hasattr(_console, "THANKS")
+      and "has been updated" not in open(_console.__file__, encoding="utf-8").read())
+_on_book(_BOOK)
+
+
+# --- the window and the copy running behind it are the same version ---------
+#
+# A newer build copied over a copy that was still running: the old process
+# served the new page from disk, and answered what it had never heard of with
+# "Unknown request." Now the page carries the build it was served from, and
+# anything from another build is refused with words the author can act on.
+
+import threading as _threading  # noqa: E402
+import urllib.request as _urlreq  # noqa: E402
+import urllib.error as _urlerr  # noqa: E402
+from http.server import ThreadingHTTPServer as _HTTPServer  # noqa: E402
+
+_httpd = _HTTPServer(("127.0.0.1", 0), _server.Handler)
+_threading.Thread(target=_httpd.serve_forever, daemon=True).start()
+_base = f"http://127.0.0.1:{_httpd.server_address[1]}"
+
+
+def _post(route, build=None, query=False):
+    headers = {"Content-Type": "application/json"}
+    if not query:
+        headers["X-AA-Token"] = _server.TOKEN
+    if build is not None:
+        headers["X-AA-Build"] = build
+    url = _base + route + (f"?t={_server.TOKEN}" if query else "")
+    req = _urlreq.Request(url, data=b"{}", headers=headers, method="POST")
+    try:
+        with _urlreq.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read())
+    except _urlerr.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def _page_build():
+    with _urlreq.urlopen(f"{_base}/?t={_server.TOKEN}", timeout=5) as resp:
+        return re.search(r'data-build="([^"]*)"', resp.read().decode()).group(1)
+
+
+check("a build is its version and a fingerprint of the code",
+      _config.build_id() == _server.BUILD and "+" in _server.BUILD
+      and _server.BUILD.startswith(_config.bundle_version()), _server.BUILD)
+check("the page is stamped with the build it was served from",
+      _page_build() == _server.BUILD, _page_build())
+_code, _got = _post("/api/env", _page_build())
+check("a page of the same build is answered", _code == 200 and "version" in _got,
+      _got)
+_code, _got = _post("/api/env", "1.0.0+000000000000")
+check("a page of another build is refused, and told to quit and reopen",
+      _code == 409 and _got.get("stale")
+      and "please quit and reopen the app" in _got["error"].lower(), _got)
+_code, _got = _post("/api/console/accept", None)
+check("so is a page from before the check, which sends no build",
+      _code == 409 and _got.get("stale"), _got)
+_code, _got = _post("/api/ping", None, query=True)
+check("the heartbeat still works from any build, so the old copy can be let go",
+      _code == 200, _got)
+check("and so does Quit", "/api/quit" in _server.ANY_BUILD_ROUTES)
+
+# The live case: the files on disk were replaced after this copy started.
+_real_build = _server.BUILD
+_server.BUILD = "1.0.0+startedolder"
+_newer = _page_build()
+_code, _got = _post("/api/books/choose", _newer)
+check("a copy running older code than the page it served refuses the page",
+      _newer == _real_build and _code == 409 and _got.get("stale"), _got)
+_server.BUILD = _real_build
+_code, _got = _post("/api/no-such-thing", _server.BUILD)
+check("an unknown request from a page of the same build is still just unknown",
+      _code == 404 and not _got.get("stale"), _got)
+_httpd.shutdown()
+_httpd.server_close()
+
+_uij = open(os.path.join(os.path.dirname(_server.__file__), "web", "app.js"),
+            encoding="utf-8").read()
+check("the page sends its build with every request",
+      "'X-AA-Build': BUILD" in _uij)
+check("the page and the app say the same thing about a mismatch",
+      " ".join(_server.STALE.split()) in
+      " ".join(_uij.replace("' +\n  '", "").split()), _server.STALE)
+
+
 _bb = _REG.find("book-b")
 _pl = {"can_apply": True, "text": "a\nb c\n", "file_path": "x.md", "line_no": 2,
        "before": "b c", "old": "c", "new": "d"}

@@ -352,6 +352,12 @@ def comment(token, book, number, text):
     )
 
 
+def commit_page(book, sha):
+    """Where a person can read one commit, for when the service's answer didn't
+    say. The reply that closes a suggestion must link the change it made."""
+    return f"https://github.com/{book.repo}/commit/{sha}" if sha else ""
+
+
 def close_issue(token, book, number):
     return _request(
         "PATCH",
