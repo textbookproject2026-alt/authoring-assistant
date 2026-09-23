@@ -140,9 +140,12 @@
     <div class="field">
       <span>How should citation links work?</span>
       <label class="radio"><input type="radio" name="anchor" value="obsidian" checked>
-        Obsidian (recommended)</label>
+        Mark each entry in the reference list and link straight to it
+        (recommended). A short tag such as ^bhaskar-1975 goes at the end of
+        the entry; the book's website follows these links.</label>
       <label class="radio"><input type="radio" name="anchor" value="html">
-        Plain web anchors, for exporting with pandoc</label>
+        Put a plain web anchor in front of each entry instead, for exporting
+        the chapter with pandoc.</label>
     </div>
   </details>
 
@@ -580,6 +583,7 @@
 
   <div class="actions">
     <button class="yes" id="sug-accept">Accept</button>
+    <button class="yes hidden" id="sug-made">I've made the change</button>
     <button class="no" id="sug-decline">Decline, politely</button>
     <button class="link" id="sug-browser">Open in my browser</button>
     <button class="link" id="sug-back">Back to the list</button>

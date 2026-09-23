@@ -37,6 +37,7 @@ import hashlib
 import io
 import os
 import tarfile
+from concurrent.futures import ThreadPoolExecutor
 
 from . import convert, github
 
@@ -106,15 +107,40 @@ def build_tree(chapter_path, chapter_bytes, media_dir, new_pictures, on_drafts):
     return entries
 
 
-def _listing(token, book):
-    """(head, tree sha, {path: tree entry}) for drafts as it is now, or a Problem."""
-    head = github.branch_head(token, book)
-    if isinstance(head, github.Problem):
-        return head
-    tree_sha = github.commit_tree(token, book, head)
-    if isinstance(tree_sha, github.Problem):
-        return tree_sha
-    tree = github.whole_tree(token, book, tree_sha)
+def _together(*calls):
+    """Run calls to the service at the same time, and return their answers in
+    order. Each call takes about three seconds from the author's Mac, so
+    calls that don't need each other's answers are never made one by one."""
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        return [f.result() for f in [pool.submit(c) for c in calls]]
+
+
+def _listing(token, book, also=None):
+    """(head, tree sha, {path: tree entry}) for drafts as it is now, or a Problem.
+
+    One round trip in the ordinary case: the branch's commit and tree, and
+    the whole listing, are asked for together by the branch's name, and the
+    listing is used only if it is of that very commit. If the branch moved
+    between the two answers, the listing is asked for again by the commit.
+
+    `also(ref)` is one more call made alongside, given the branch's name (or
+    its commit, when asked again); its answer comes back as a fourth item,
+    for the caller to check against the listing.
+    """
+    ref = book.drafts_branch
+    calls = [lambda: github.branch_tip(token, book),
+             lambda: github.whole_tree(token, book, ref)]
+    if also is not None:
+        calls.append(lambda: also(ref))
+    tip, tree, *extra = _together(*calls)
+    if isinstance(tip, github.Problem):
+        return tip
+    head, tree_sha = tip
+    if isinstance(tree, github.Problem) or tree.get("sha") not in (head, tree_sha):
+        calls = [lambda: github.whole_tree(token, book, head)]
+        if also is not None:
+            calls.append(lambda: also(head))
+        tree, *extra = _together(*calls)
     if isinstance(tree, github.Problem):
         return tree
     if tree.get("truncated"):
@@ -124,7 +150,7 @@ def _listing(token, book):
         )
     files = {e.get("path"): e for e in tree.get("tree") or []
              if isinstance(e, dict)}
-    return head, tree_sha, files
+    return (head, tree_sha, files, *extra)
 
 
 def snapshot(token, book):
@@ -136,10 +162,37 @@ def snapshot(token, book):
     listing = _listing(token, book)
     if isinstance(listing, github.Problem):
         return listing
-    head, tree_sha, entries = listing
+    return _snap(*listing)
+
+
+def _snap(head, tree_sha, entries):
     return {"head": head, "tree": tree_sha,
             "files": {p: e["sha"] for p, e in entries.items()
                       if e.get("type") == "blob" and e.get("sha")}}
+
+
+def snapshot_with(token, book, path):
+    """snapshot, and the bytes of one file in it: (snap, bytes or None), or a
+    Problem. None when the snapshot has no such file.
+
+    The file is asked for alongside the listing, so this takes no longer than
+    the snapshot alone. Its bytes are used only if they are the very file the
+    listing names; otherwise it is read again by its hash.
+    """
+    listing = _listing(token, book, also=lambda ref: github.file_bytes_at(
+        token, book, path, ref))
+    if isinstance(listing, github.Problem):
+        return listing
+    head, tree_sha, entries, data = listing
+    snap = _snap(head, tree_sha, entries)
+    sha = snap["files"].get(path)
+    if sha is None:
+        return snap, None
+    if isinstance(data, github.Problem) or blob_sha(data) != sha:
+        data = github.blob_bytes(token, book, sha)
+        if isinstance(data, github.Problem):
+            return data
+    return snap, data
 
 
 def safe_path(path):

@@ -24,6 +24,9 @@ from .edits import Edit, apply_edits
 from .mdmap import DocMap
 
 NEEDS_TRIAGE = "needs-triage"
+# A suggestion the author has taken on but the tool couldn't make: it stays
+# open, and on the author's list, until a commit holds the change.
+ACCEPTED = "accepted"
 
 # --- what the reader is told --------------------------------------------------
 #
@@ -51,10 +54,12 @@ IN_VAULT = (
     "time the book is published.\n\n_Replied from the author's console._"
 )
 
-# Accepted with nothing changed: the author is taking it on by hand.
+# Accepted with nothing changed: the author is taking it on by hand. The
+# suggestion stays open, labelled ACCEPTED, until a commit holds the change.
 TAKEN_ON = (
     "Thank you for this — it has been read and taken on board. The chapter "
-    "hasn't been changed yet: the author will make the change by hand.\n\n"
+    "hasn't been changed yet: the author will make the change by hand, and "
+    "this suggestion stays open until they have.\n\n"
     "_Replied from the author's console._"
 )
 
@@ -126,6 +131,9 @@ def parse_suggestion(issue):
         "reasoning": _fenced_block(body, "### Reasoning"),
         "when": issue.get("created_at"),
         "url": issue.get("html_url", ""),
+        "accepted": ACCEPTED in {
+            (l.get("name") if isinstance(l, dict) else l)
+            for l in issue.get("labels") or []},
     }
 
 

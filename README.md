@@ -321,8 +321,13 @@ ordinary readers.
 Open one and you see who sent it, which page it is about, and what they said.
 Then:
 
-- **Accept** — you are taking it on. A thank-you is sent and it disappears from
-  the list.
+- **Accept** — you are taking it on. A thank-you is sent. If the tool made the
+  change, the thank-you links to it and the suggestion leaves the list. If the
+  change is yours to make, the reader is told so, and the suggestion **stays in
+  the list, marked Accepted**, so it can't be forgotten. Make the change under
+  Chapters and send it to drafts, then open the suggestion and press **I've made
+  the change**: the tool shows you the latest change to that page, and when you
+  confirm it, the reader is sent a link to it and the suggestion is closed.
 - **Decline, politely** — a courteous reply is sent saying the text is staying as
   it is. This is a perfectly good outcome; an answered "no" is far better than
   silence.
@@ -468,8 +473,9 @@ at the end and lists them — usually a sign that an entry is missing from your
 reference list.
 
 **No concept pages were found.** The tool looks for a folder called
-`Definitions`, `Concepts`, `Terms` or similar inside your vault. If you keep them
-somewhere else, choose your whole vault folder rather than a single chapter.
+`Definitions`, `Concepts`, `Terms` or similar, holding at least two pages. A book
+without one has no concept pages, and the tool does not offer your other chapters
+in their place; the citation and glossary checks still work.
 
 **Nothing at all was found.** That usually means you have already run it on that
 chapter. The final screen explains what was skipped.

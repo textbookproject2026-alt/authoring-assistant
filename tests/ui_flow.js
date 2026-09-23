@@ -129,6 +129,8 @@ let sendReplies = [];
 // The drafts area as the Chapters tools and the console see it (§8 step 2).
 let commitReplies = [];
 let acceptReplies = [];
+let madeReplies = [];
+let consoleSuggestions = [];
 let planReply = null;       // in place of PLAN, when set
 let planGate = null;        // while set, the plan is held back until it settles
 let lastHeaders = null;
@@ -224,7 +226,7 @@ const fetch = async (route, opts) => {
                              keychain: true, workspace: CURRENT_WS },
     '/api/console/load': {
       book: CURRENT_WS.book, workspace: CURRENT_WS,
-      who: 'The Author', suggestions: [], drafts: [], weekly: [],
+      who: 'The Author', suggestions: consoleSuggestions, drafts: [], weekly: [],
       problems: [], offline: false,
       publish: {
         open: true, waiting: false, number: 77,
@@ -273,6 +275,7 @@ const fetch = async (route, opts) => {
     },
     '/api/console/plan': planReply || PLAN,
     '/api/console/accept': route === '/api/console/accept' ? acceptReplies.shift() : null,
+    '/api/console/made': route === '/api/console/made' ? madeReplies.shift() : null,
     '/api/preview': (() => { lastPreviewBody = body; return {
       counts: { references: 1, terms: 2, glossary: 1, expanded: 1 },
       diff: [{ line_no: 5, before: 'a', after: 'b' }],
@@ -959,6 +962,13 @@ function check(name, cond, got) {
   check('while the plan is on its way, Accept is not available',
         els['sug-accept'].disabled && allText(els['sug-plan']).includes('Looking at your chapter'),
         allText(els['sug-plan']));
+  const hasSpinner = n => (n.className || '').includes('spinner') ||
+    (n.children || []).some(hasSpinner);
+  check('and the author can see it working: a spinner, with the seconds counted',
+        hasSpinner(els['sug-plan']), allText(els['sug-plan']));
+  await new Promise(r => setTimeout(r, 1100));
+  check('…counting up while they wait',
+        / 1 s\b/.test(allText(els['sug-plan'])), allText(els['sug-plan']));
   await els['sug-accept'].onclick();
   check('and pressing it anyway sends nothing and closes nothing',
         bodies['/api/console/accept'] === undefined, bodies['/api/console/accept']);
@@ -1005,14 +1015,53 @@ function check(name, cond, got) {
   check('a suggestion for the author to make says the chapter will not be changed',
         handText.includes('by hand') && handText.includes('Nothing in the chapter is changed') &&
         !find(els['sug-plan'], 'sug-apply'), handText);
+  check('…and that it stays on the list, marked Accepted, until it is',
+        handText.includes('stays in this list, marked Accepted'), handText);
   els['sug-apply'] = null; els['sug-apply-vault'] = null;
-  acceptReplies = [{ done: true, steps: [
+  acceptReplies = [{ done: true, kept_open: true, steps: [
     'A thank-you was sent, saying you will make the change by hand. The chapter itself was not changed — make the change under Chapters.',
-    'The suggestion was marked as dealt with.'] }];
+    'The suggestion stays under Waiting for you, marked Accepted, until the change is made.'] }];
   await els['sug-accept'].onclick();
   check('accepting it asks for no change at all',
         bodies['/api/console/accept'].apply === false &&
         bodies['/api/console/accept'].apply_vault === false, bodies['/api/console/accept']);
+  check('and the author is told it is now theirs to make',
+        els['cdone-title'].textContent === 'Accepted — now yours to make',
+        els['cdone-title'].textContent);
+
+  // --- accepted by hand: the list is the author's to-do list -----------------
+
+  const taken = { number: 61, who: 'A Reader', when: '2026-09-23T00:00:00Z',
+    page: 'chapter-1', suggestion: 'blaaaa', reasoning: '', accepted: true };
+  consoleSuggestions.push(taken);
+  await ctx.loadConsole();
+  check('an accepted suggestion is still waiting, and marked as accepted',
+        allText(els['suggestions-list']).includes('Accepted — yours to make') &&
+        els['suggestions-count'].textContent === '(1)',
+        allText(els['suggestions-list']));
+  await ctx.openSuggestion(taken);
+  check('opened, it offers “I’ve made the change” in place of Accept',
+        els['sug-accept'].classList.contains('hidden') &&
+        !els['sug-made'].classList.contains('hidden') &&
+        allText(els['sug-plan']).includes('You accepted this'), allText(els['sug-plan']));
+  madeReplies = [{ page: 'chapter-1', change: { sha: 'c9', who: 'author',
+    when: '2026-09-23T11:00:00Z', message: 'Make the change a reader suggested' } }];
+  await els['sug-made'].onclick();
+  check('pressed, it shows the change it found before closing anything',
+        bodies['/api/console/made'].sha === undefined &&
+        allText(els['sug-plan']).includes('Make the change a reader suggested') &&
+        find(els['sug-plan'], 'sug-made-confirm'), allText(els['sug-plan']));
+  madeReplies = [{ done: true, steps: ['A thank-you was sent, with a link to your change.',
+    'The suggestion was marked as dealt with.'] }];
+  await find(els['sug-plan'], 'sug-made-confirm').onclick();
+  check('and confirmed, it closes it for that change and no other',
+        bodies['/api/console/made'].sha === 'c9' &&
+        !els['step-console-done'].classList.contains('hidden'), bodies['/api/console/made']);
+  await ctx.openSuggestion(Object.assign({}, taken, { accepted: false, number: 63 }));
+  check('a suggestion not yet accepted offers Accept again',
+        !els['sug-accept'].classList.contains('hidden') &&
+        els['sug-made'].classList.contains('hidden'));
+  consoleSuggestions.length = 0;
   planReply = null;
 
   // --- the window and the app behind it are the same version -------------------

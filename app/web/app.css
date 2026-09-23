@@ -171,6 +171,10 @@ label.confirm { margin-top: 6px; font-weight: 600; }
 .spinner { width: 26px; height: 26px; border: 3px solid var(--line);
   border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spinner.small { display: inline-block; width: 15px; height: 15px; border-width: 2px;
+  vertical-align: -2px; margin-right: 9px; }
+.tag { display: inline-block; font-size: .8em; font-weight: 600; padding: 1px 8px;
+  border-radius: 9px; background: var(--line); margin-left: 8px; }
 
 /* error overlay */
 #error { position: fixed; inset: 0; background: rgba(27,26,23,.45);

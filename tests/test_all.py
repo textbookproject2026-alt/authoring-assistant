@@ -1798,6 +1798,7 @@ for _d in (_va, _vb, _vmis, _vplain, _va2, _sess_root):
 # ---------------------------------------------------------------------------
 
 import hashlib as _hashlib  # noqa: E402
+import threading as _threading_mod  # noqa: E402
 import posixpath as _posixpath  # noqa: E402
 
 from app import drafts as _drafts  # noqa: E402
@@ -1813,6 +1814,9 @@ class _GitRepo(_Books):
         self.blobs, self.trees, self.commits = {}, {}, {}
         self.branches = {}
         self.before_move = None    # another client, acting just before our move
+        self.before_listing = None  # another client, acting as drafts is listed
+        self.ticks = 0             # the service's clock, one tick per event
+        self.labelled = {}         # issue number -> [(label, when)]
         root = self._commit(self._tree(self._files(files)), [], "start", "maint")
         self.branches = {"main": root, "drafts": root}
 
@@ -1830,27 +1834,32 @@ class _GitRepo(_Books):
         self.trees[sha] = dict(files)
         return sha
 
+    def now(self):
+        self.ticks += 1
+        return f"2026-09-23T10:{self.ticks // 60:02d}:{self.ticks % 60:02d}Z"
+
     def _commit(self, tree, parents, message, who):
         sha = _hashlib.sha1(json.dumps([tree, parents, message, who,
                                          len(self.commits)]).encode()).hexdigest()
         self.commits[sha] = {"tree": tree, "parents": parents,
-                             "message": message, "who": who}
+                             "message": message, "who": who, "when": self.now()}
         return sha
 
     def files(self, branch="drafts"):
         tree = self.trees[self.commits[self.branches[branch]]["tree"]]
         return {p: self.blobs[s] for p, s in tree.items()}
 
-    def push(self, who, changes, message="Update from the browser editor"):
+    def push(self, who, changes, message="Update from the browser editor",
+             branch="drafts"):
         """Someone else writes to drafts, as the browser editor would."""
-        files = dict(self.trees[self.commits[self.branches["drafts"]]["tree"]])
+        files = dict(self.trees[self.commits[self.branches[branch]]["tree"]])
         for path, data in changes.items():
             if data is None:
                 files.pop(path, None)
             else:
                 files.update(self._files({path: data}))
-        self.branches["drafts"] = self._commit(
-            self._tree(files), [self.branches["drafts"]], message, who)
+        self.branches[branch] = self._commit(
+            self._tree(files), [self.branches[branch]], message, who)
 
     def _ancestors(self, sha):
         seen, todo = set(), [sha]
@@ -1863,10 +1872,33 @@ class _GitRepo(_Books):
 
     def request(self, method, url, token=None, payload=None, accept=None):
         rest = url[len(self.base) + 1:]
+        issue = re.match(r"issues/(\d+)/(labels|events)", rest)
+        if url.startswith(self.base + "/") and issue:
+            self.calls.append((method, url, payload))
+            number = int(issue.group(1))
+            if method == "POST" and issue.group(2) == "labels":
+                when = self.now()
+                self.labelled.setdefault(number, []).extend(
+                    (name, when) for name in payload["labels"])
+                return [{"name": n} for n, _ in self.labelled[number]]
+            if method == "GET" and issue.group(2) == "events":
+                return [{"event": "labeled", "label": {"name": n},
+                         "created_at": w} for n, w in self.labelled.get(number, [])]
+            return {}
         if not url.startswith(self.base + "/") or \
-                not rest.startswith(("git/", "commits?")):
+                not rest.startswith(("git/", "commits?", "contents/")):
             return super().request(method, url, token, payload, accept)
         self.calls.append((method, url, payload))
+        if method == "GET" and rest.startswith("contents/"):
+            path, q = rest[len("contents/"):].split("?", 1)
+            ref = urllib.parse.parse_qs(q)["ref"][0]
+            ref = self.branches.get(ref, ref)
+            sha = self.trees[self.commits[ref]["tree"]].get(
+                urllib.parse.unquote(path))
+            if sha is None:
+                return _github.Problem("gone", code=404)
+            return {"sha": sha, "encoding": "base64",
+                    "content": base64.b64encode(self.blobs[sha]).decode()}
         if method == "GET" and rest.startswith("git/ref/heads/"):
             name = urllib.parse.unquote(rest[len("git/ref/heads/"):])
             if name not in self.branches:
@@ -1875,7 +1907,15 @@ class _GitRepo(_Books):
         if method == "GET" and rest.startswith("git/commits/"):
             return {"tree": {"sha": self.commits[rest.split("/")[2]]["tree"]}}
         if method == "GET" and rest.startswith("git/trees/"):
-            files = self.trees[rest.split("/")[2].split("?")[0]]
+            # As the service does, a commit's or a branch's name lists that
+            # commit's tree, and the answer is named after the commit.
+            name = urllib.parse.unquote(rest[len("git/trees/"):].split("?")[0])
+            if self.before_listing:
+                self.before_listing()
+                self.before_listing = None
+            name = self.branches.get(name, name)
+            files = self.trees[self.commits[name]["tree"]
+                               if name in self.commits else name]
             entries, dirs = [], set()
             for path, sha in files.items():
                 entries.append({"path": path, "type": "blob", "sha": sha})
@@ -1883,13 +1923,33 @@ class _GitRepo(_Books):
                 for i in range(1, len(parts) + 1):
                     dirs.add("/".join(parts[:i]))
             entries += [{"path": d, "type": "tree", "sha": "t"} for d in dirs]
-            return {"tree": entries, "truncated": False}
+            return {"sha": name, "tree": entries, "truncated": False}
         if method == "GET" and rest.startswith("git/blobs/"):
             return {"content": base64.b64encode(
                 self.blobs[rest.split("/")[2]]).decode()}
         if method == "GET" and rest.startswith("commits?"):
             q = urllib.parse.parse_qs(rest.split("?", 1)[1])
-            path, sha = q["path"][0], q["sha"][0]
+            sha = self.branches.get(q["sha"][0], q["sha"][0])
+            if "path" not in q:
+                return [{"sha": sha,
+                         "commit": {"tree": {"sha": self.commits[sha]["tree"]}}}]
+            path = q["path"][0]
+            if "since" in q:
+                out = []
+                for c in self._walk(sha):
+                    parents = self.commits[c]["parents"]
+                    mine = self.trees[self.commits[c]["tree"]].get(path)
+                    before = (self.trees[self.commits[parents[0]]["tree"]].get(path)
+                              if parents else None)
+                    info = self.commits[c]
+                    if mine != before and info["when"] >= q["since"][0]:
+                        out.append({"sha": c,
+                                    "html_url": f"https://example.invalid/commit/{c}",
+                                    "commit": {"message": info["message"],
+                                               "author": {"name": info["who"],
+                                                          "date": info["when"]}},
+                                    "author": {"login": info["who"]}})
+                return out
             for c in self._walk(sha):
                 parents = self.commits[c]["parents"]
                 mine = self.trees[self.commits[c]["tree"]].get(path)
@@ -2504,6 +2564,46 @@ _cp, _src = terms.concept_pages_in(
 check("on drafts, the folder of definitions is found as it is on disk",
       _src == "Definitions" and [p["title"] for p in _cp] == ["A One", "B Two"], _cp)
 
+# Found in step 2's live proof: book two has no Definitions folder, and its
+# other chapters were offered as concept pages instead.
+_BOOK_TWO_FILES = ["README.md", "LICENSE.txt", "content/index.md",
+                   "content/chapter-1.md", "content/chapter-2.md",
+                   "content/chapter-3.md", "quartz/cli/README.md",
+                   "suggest-edit/suggest-edit.js"]
+_cp, _src = terms.concept_pages_in(_BOOK_TWO_FILES, "content/chapter-2.md",
+                                   lambda p: None)
+check("a book with no folder of concept pages has no concept pages",
+      _cp == [] and _src == "", (_cp, _src))
+_nodefs = tempfile.mkdtemp()
+for _n in ("chapter-1.md", "chapter-2.md", "chapter-3.md"):
+    with open(os.path.join(_nodefs, _n), "w") as fh:
+        fh.write("# A chapter\n")
+check("…and so has a vault with none, rather than its other chapters",
+      terms.discover_concept_pages(_nodefs, os.path.join(_nodefs, "chapter-2.md"))
+      == ([], ""))
+shutil.rmtree(_nodefs, ignore_errors=True)
+check("a folder named by the author is still used",
+      [p["title"] for p in terms.concept_pages_in(
+          _BOOK_TWO_FILES, "content/chapter-2.md", lambda p: None,
+          folder="content")[0]] == ["chapter-1", "chapter-3"])
+
+# Also from step 2: the drafts area's chapter list showed README as a chapter.
+_two = _session_mod.DraftsSession("book-b", {"head": "h", "tree": "t", "files": {
+    p: "s" for p in _BOOK_TWO_FILES}}, lambda sha: b"")
+check("a book laid out for the website lists only its pages as chapters",
+      [c["path"] for c in _two.chapters()] ==
+      ["content/chapter-1.md", "content/chapter-2.md", "content/chapter-3.md",
+       "content/index.md"], _two.chapters())
+_one = _session_mod.DraftsSession("book-a", {"head": "h", "tree": "t", "files": {
+    p: "s" for p in ("README.md", "CONTRIBUTING.md", "QA.md", "LICENSE",
+                     "chapters/Chapter 1.md", "chapters/Definitions/Agency.md",
+                     "chapters/readme.md", ".github/PULL_REQUEST.md")}},
+    lambda sha: b"")
+check("a book kept as a vault lists its pages, not the files about the repository",
+      [c["path"] for c in _one.chapters()] ==
+      ["QA.md", "chapters/Chapter 1.md", "chapters/Definitions/Agency.md"],
+      _one.chapters())
+
 
 # --- a reader's suggestion, made in the drafts area ---------------------------
 
@@ -2555,6 +2655,83 @@ check("and the issue is closed with a link to the commit",
       and len(_closes) == 1 and _closes[0][2] == {"state": "closed"}, _comments)
 check("the author is told it went to drafts",
       any("drafts area" in t for t in _ac["steps"]), _ac["steps"])
+
+# Working out a plan took 12–14 seconds from the author's Mac: four calls to
+# the service, one after another, about three seconds each. The chapter is
+# now asked for alongside the listing, so it takes two round trips.
+class _Slow(_GitRepo):
+    PAUSE = 0.3
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.lock = _threading_mod.Lock()
+        self.busy = self.most = 0
+
+    def request(self, method, url, token=None, payload=None, accept=None):
+        if url.startswith(self.base + "/") and method == "GET" and \
+                "/issues" not in url:
+            with self.lock:
+                self.busy += 1
+                self.most = max(self.most, self.busy)
+            time.sleep(self.PAUSE)
+            with self.lock:
+                self.busy -= 1
+        return super().request(method, url, token, payload, accept)
+
+
+_slow = _Slow("example-org/book-a", _SUG_START)
+_slow.issues = _sr.issues
+_with_service(_slow, lambda: _server.r_console_load(None, dict(_A)))
+_slow.calls.clear()
+_t0 = time.monotonic()
+_pl = _with_service(_slow, lambda: _server.r_console_plan(None, dict(_A, number=51)))
+_took = time.monotonic() - _t0
+check("a plan takes one round trip to the service, not four",
+      _pl["can_apply"] and _pl["line_no"] == 3 and _slow.most == 3
+      and len(_slow.calls) == 3 and _took < 2 * _Slow.PAUSE,
+      (_took, _slow.most, [c[1] for c in _slow.calls]))
+check("…and the chapter it read is the one the listing names",
+      any("/contents/chapters/chapter-01.md?ref=" in c[1] for c in _slow.calls)
+      and not any("/git/blobs/" in c[1] for c in _slow.calls))
+
+# Asked for together by the branch's name, the answers can straddle someone
+# else's change. The listing and the chapter are only used if they are of the
+# commit the plan names; otherwise they are asked for again by that commit.
+_straddle = _GitRepo("example-org/book-a", _SUG_START)
+_straddle.issues = _sr.issues
+_s_old = _straddle.branches["drafts"]
+_real_tip = _github.branch_tip
+_github.branch_tip = lambda token, book: (
+    _s_old, _straddle.commits[_s_old]["tree"])
+_straddle.before_listing = lambda: _straddle.push(
+    "cms-user", {"chapters/chapter-01.md": "# One\n\nThe the words moved.\n"})
+try:
+    _with_service(_straddle, lambda: _server.r_console_load(None, dict(_A)))
+    _pl = _with_service(_straddle, lambda: _server.r_console_plan(
+        None, dict(_A, number=51)))
+finally:
+    _github.branch_tip = _real_tip
+_plan_kept = _server.CONSOLE["plans"][("book-a", "51")]
+check("a listing from after the branch moved is not mixed with the commit before",
+      _pl["head"] == _s_old and _pl["before"] == "The the words are here."
+      and _plan_kept["snap"]["files"]["chapters/chapter-01.md"]
+      == _straddle.trees[_straddle.commits[_s_old]["tree"]]["chapters/chapter-01.md"],
+      _pl)
+_fresh = _GitRepo("example-org/book-a", _SUG_START)
+_fresh.issues = _sr.issues
+_with_service(_fresh, lambda: _server.r_console_load(None, dict(_A)))
+_real_bytes = _github.file_bytes_at
+_github.file_bytes_at = lambda *a: b"# One\n\nSomething else entirely.\n"
+try:
+    _pl = _with_service(_fresh, lambda: _server.r_console_plan(None, dict(_A, number=51)))
+finally:
+    _github.file_bytes_at = _real_bytes
+check("a chapter that came back different from the listing is read again by its name",
+      _pl["can_apply"] and _pl["before"] == "The the words are here.", _pl)
+_sr.calls.clear()
+_with_service(_sr, lambda: _server.r_console_plan(None, dict(_A, number=52)))
+check("a page outside the book is never asked for",
+      not any("/contents/" in c[1] for c in _sr.calls), _sr.calls)
 
 # Drafts moved between looking and accepting: nothing written, nothing
 # closed, and a fresh plan offered.
@@ -2669,7 +2846,35 @@ check("they are told honestly that it will be made by hand",
 check("and the author is told the chapter itself was not changed",
       any("was not changed" in t for t in _ac["steps"]) and "url" not in _ac,
       _ac["steps"])
-check("the suggestion is then closed, once", len(_closes(_rb, 61)) == 1)
+
+# Found in step 2's live proof: closed, it dropped out of "Waiting for you" and
+# could be forgotten. It stays open, labelled accepted, until a commit holds
+# the change, so the list is the author's to-do list.
+check("a suggestion accepted by hand is not closed", _closes(_rb, 61) == [])
+check("…but labelled accepted, and no longer waiting to be looked at",
+      [c[2] for c in _rb.calls if c[0] == "POST"
+       and c[1].endswith("/issues/61/labels")] == [{"labels": ["accepted"]}]
+      and any(c[0] == "DELETE" and c[1].endswith("/issues/61/labels/needs-triage")
+              for c in _rb.calls))
+check("…and the reader is told it stays open until the change is made",
+      "stays open" in _said[0], _said)
+check("…and the author is told it stays on their list",
+      _ac["kept_open"] and any("Waiting for you" in t for t in _ac["steps"]),
+      _ac["steps"])
+check("a suggestion carrying that label is read as accepted",
+      _console.parse_suggestion(dict(_ISSUE, labels=[{"name": "accepted"}]))["accepted"]
+      and not _console.parse_suggestion(_ISSUE)["accepted"])
+_pl = _with_service(_rb, lambda: _server.r_console_plan(None, dict(_BB, number=61)))
+_n = len(_replies(_rb, 61))
+check("accepting it again by hand is refused, and the reader isn't thanked twice",
+      "already accepted" in (_refused(lambda: _with_service(
+          _rb, lambda: _server.r_console_accept(None, dict(
+              _BB, number=61, head=_pl["head"], plan_id=_pl["plan_id"]))))
+          or "") and len(_replies(_rb, 61)) == _n)
+check("it can't be closed as made before anything has changed the page",
+      "Nothing has changed" in (_refused(lambda: _with_service(
+          _rb, lambda: _server.r_console_made(None, dict(_BB, number=61)))) or "")
+      and _closes(_rb, 61) == [])
 
 _pl = _with_service(_rb, lambda: _server.r_console_plan(None, dict(_BB, number=62)))
 _ac = _with_service(_rb, lambda: _server.r_console_accept(
@@ -2684,6 +2889,31 @@ check("and only then is the reader told it changed, with a link to that commit",
       len(_said) == 1 and _console.claims_change(_said[0])
       and f"https://example.invalid/commit/{_made}" in _said[0]
       and _ac["url"] in _said[0] and len(_closes(_rb, 62)) == 1, _said)
+
+# The author makes 61's change by hand, and it reaches drafts as a commit.
+_rb.push("author", {"content/chapter-1.md": "# One\n\nBlaaaa. The words are here.\n"},
+         "Make the change a reader suggested", branch="staging")
+_byhand = _rb.branches["staging"]
+_seen = _with_service(_rb, lambda: _server.r_console_made(None, dict(_BB, number=61)))
+check("once a commit has changed the page, the author is shown that commit",
+      _seen["change"]["sha"] == _byhand
+      and _seen["change"]["message"] == "Make the change a reader suggested"
+      and _closes(_rb, 61) == [], _seen)
+check("closing it for a commit other than the latest is refused",
+      _refused(lambda: _with_service(_rb, lambda: _server.r_console_made(
+          None, dict(_BB, number=61, sha=_made)))) is not None
+      and _closes(_rb, 61) == [])
+_done = _with_service(_rb, lambda: _server.r_console_made(
+    None, dict(_BB, number=61, sha=_byhand)))
+_said = _replies(_rb, 61)
+check("confirmed, the reader is told it changed, with a link to that commit",
+      _done["done"] and _console.claims_change(_said[-1])
+      and f"https://example.invalid/commit/{_byhand}" in _said[-1], _said)
+check("and only then is the suggestion closed, once", len(_closes(_rb, 61)) == 1)
+check("one that was never accepted can't be closed as made",
+      "hasn't been accepted" in (_refused(lambda: _with_service(
+          _rb, lambda: _server.r_console_made(
+              None, dict(_BB, number=62)))) or ""))
 
 # Found in the live proof on book two, issue #6: an exact replacement, found
 # once on one line of the chapter on drafts, was answered "by hand" with
@@ -2780,6 +3010,17 @@ check("no reply that says the chapter was updated is left in the app",
       not hasattr(_console, "THANKS")
       and "has been updated" not in open(_console.__file__, encoding="utf-8").read())
 _on_book(_BOOK)
+
+
+# Authors no longer use Obsidian: the citation-link choice says what the link
+# does, and still sends the same value.
+_page = open(os.path.join(os.path.dirname(_server.__file__), "web", "index.html"),
+             encoding="utf-8").read()
+_anchor_choice = _page[_page.index('name="anchor"') - 200:
+                       _page.index('value="html"') + 200]
+check("the citation-link choice doesn't name Obsidian, and keeps its values",
+      "Obsidian" not in _anchor_choice and 'value="obsidian" checked' in _anchor_choice
+      and "reference list" in _anchor_choice, _anchor_choice)
 
 
 # --- the window and the copy running behind it are the same version ---------
