@@ -842,6 +842,13 @@ function renderDrafts(d) {
       'earlier import and aren\'t in this one, so they will be taken out: ' +
       d.removed.join(', ') + '.'));
   }
+  if (d.contents && d.contents.line && !d.refused && !d.nothing_to_send) {
+    removed.appendChild(el('li', '', 'So readers can find it, the front page gets one new ' +
+      'line under “Contents”, in the same change: ' + d.contents.line +
+      ' Nothing else on the front page changes.'));
+  } else if (d.contents && d.contents.note && !d.refused && !d.nothing_to_send) {
+    removed.appendChild(el('li', '', d.contents.note));
+  }
   document.getElementById('import-drafts-problem').textContent = d.refused || '';
   document.getElementById('import-replace-label').classList.toggle(
     'hidden', !(d.exists && !d.refused && !d.nothing_to_send));
@@ -938,6 +945,8 @@ function renderImportDone() {
       `in one change made by you` +
       (s.removed ? `, which also took out ${s.removed} picture${s.removed === 1 ? '' : 's'} ` +
         'the Word document no longer has' : '') + '.'));
+    if (s.contents) list.appendChild(el('li', '',
+      'The front page lists it under “Contents”, in the same change.'));
     list.appendChild(el('li', '', 'Readers don\'t see it until the drafts go live.'));
   }
   list.appendChild(el('li', '',
@@ -1336,6 +1345,23 @@ async function openBookPicker() {
     note.textContent = r.note;
     note.classList.remove('hidden');
   }
+  const invites = document.getElementById('books-invites');
+  invites.innerHTML = '';
+  const inv = r.invitations || [];
+  document.getElementById('books-invites-box').classList.toggle('hidden', !inv.length);
+  inv.forEach(b => {
+    const li = el('li');
+    const btn = el('button');
+    btn.appendChild(el('strong', '', b.title));
+    btn.appendChild(el('span', 'who', 'Accept the invitation and start working on it' +
+      (b.inviter ? ' · from ' + b.inviter : '')));
+    btn.onclick = () => acceptInvitation(b.invitation, btn);
+    li.appendChild(btn);
+    invites.appendChild(li);
+  });
+  const inviteNote = document.getElementById('books-invite-note');
+  inviteNote.textContent = r.invite_note || '';
+  inviteNote.classList.toggle('hidden', !r.invite_note);
   r.books.forEach(b => {
     const li = el('li');
     const btn = el('button');
@@ -1346,7 +1372,7 @@ async function openBookPicker() {
     li.appendChild(btn);
     list.appendChild(li);
   });
-  if (!r.books.length) {
+  if (!r.books.length && !inv.length) {
     list.appendChild(el('li', 'none',
       'Your account can’t make changes to any registered book. The book’s maintainer can give you access.'));
   }
@@ -1357,6 +1383,18 @@ async function openBookPicker() {
       ? '1 other book isn’t shown, because your account can’t make changes to it.'
       : r.hidden + ' other books aren’t shown, because your account can’t make changes to them.';
   }
+}
+
+async function acceptInvitation(id, btn) {
+  if (btn) btn.disabled = true;
+  let r;
+  try { r = await api('/api/books/accept', { invitation: id }); } catch (e) {
+    if (btn) btn.disabled = false;
+    return fail(e.message);
+  }
+  // Accepted: the book is theirs to work on, so it is chosen straight away.
+  if (r.access === 'write') return chooseBook(r.slug);
+  return openBookPicker();
 }
 
 async function chooseBook(slug) {

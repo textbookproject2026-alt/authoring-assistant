@@ -17,8 +17,8 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import (config, console, convert, drafts, github, keychain, llm,
-               picker, registry)
+from . import (config, console, contents, convert, drafts, github, keychain,
+               llm, picker, registry)
 from .session import DraftsSession, Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -826,19 +826,56 @@ def _drafts_plan(token, book, result):
         raise KeyError("Where this chapter is going isn't inside the book's "
                        "folder, so it can't be sent. Nothing was sent.")
     chapter_path, media_dir = paths
-    state = _unwrap(drafts.read(token, book, chapter_path, media_dir))
+    index = drafts.index_path(result["vault"], IMPORT["folder"])
+    state = _unwrap(drafts.read(token, book, chapter_path, media_dir, index))
     entries = []
     if not state["refused"]:
         entries = drafts.build_tree(chapter_path,
                                     result["text"].encode("utf-8"), media_dir,
                                     drafts.pictures(result),
                                     state["on_drafts"])
+    front = None
+    if entries and not state["refused"] and not state["exists"]:
+        front = _contents_entry(token, book, state, index, chapter_path,
+                                result["text"], result["md_name"])
+        if front.get("entry"):
+            entries.append(front.pop("entry"))
     result["drafts"] = {"book": book.slug, "state": state, "entries": entries,
-                        "chapter_path": chapter_path}
+                        "chapter_path": chapter_path, "contents": front}
     shown = drafts.describe(book, state, entries, chapter_path, media_dir,
                             result["text"])
+    shown["contents"] = front
     shown["head"] = state["head"]
     return shown
+
+
+def _contents_entry(token, book, state, index, chapter_path, text, md_name):
+    """A new chapter's line under the front page's "Contents" (contents.py).
+
+    {"line", "entry"} when one is added, or {"note"} saying why not. The
+    front page is read from the same listing the chapter was checked against,
+    so the commit is of one consistent drafts area.
+    """
+    if not index or not state.get("index_sha"):
+        return {"note": "The book has no front page (index.md) in the drafts "
+                        "area, so no line was added for this chapter."}
+    data = github.blob_bytes(token, book, state["index_sha"])
+    old = None if isinstance(data, github.Problem) else drafts.text_of(data)
+    if old is None:
+        return {"note": "The front page could not be read just now, so no "
+                        "line was added for this chapter. Add it yourself, "
+                        "or send the chapter again later."}
+    target = chapter_path
+    top = index.rsplit("/", 1)[0] + "/" if "/" in index else ""
+    if top and target.startswith(top):
+        target = target[len(top):]      # links are from the front page's folder
+    title = contents.chapter_title(text, md_name)
+    new, why = contents.add_line(old, target, title)
+    if new is None:
+        return {"note": why}
+    data = new.encode("utf-8")
+    return {"line": contents.line_for(target, title), "path": index,
+            "entry": {"path": index, "sha": drafts.blob_sha(data), "data": data}}
 
 
 def r_import_drafts_check(handler, data):
@@ -904,6 +941,7 @@ def r_import_drafts_send(handler, data):
         "files": len(plan["entries"]) - len(removed),
         "removed": len(removed),
         "saved": result.get("saved"),
+        "contents": bool((plan.get("contents") or {}).get("line")),
     }
 
 
@@ -1210,8 +1248,10 @@ def r_books(handler, data):
     books = reg.active()
     offline = False
     note = ""
+    invites, invite_note = [], ""
     problem = _ensure_login(token)
     if problem is None:
+        invites, invite_note = _book_invitations(token, books)
         problem = _check_access(token, books)
     if problem is not None:
         offline = problem.offline
@@ -1225,6 +1265,7 @@ def r_books(handler, data):
                if when else "it isn't known yet which books you can change.")
         )
 
+    invited = {i["slug"] for i in invites}
     shown, hidden = [], 0
     for book in books:
         level = _known_access(book.slug)
@@ -1232,15 +1273,74 @@ def r_books(handler, data):
             item = book.describe()
             item["access"] = level
             shown.append(item)
-        else:
+        elif book.slug not in invited:
             hidden += 1
+    invites = [i for i in invites
+               if not any(b["slug"] == i["slug"] for b in shown)]
     return {
         "books": shown,
         "hidden": hidden,
+        "invitations": invites,
+        "invite_note": invite_note,
         "offline": offline,
         "note": note,
         "workspace": _workspace_info(),
     }
+
+
+def _book_invitations(token, books):
+    """Invitations to registered books waiting for this author: ([...], note).
+
+    Only invitations to a book in the registry are offered; any other
+    invitation the account has is none of this app's business and is never
+    shown or touched. A sign-in from before the app could accept invitations
+    is told how to get them, and nothing else changes.
+    """
+    CONSOLE["invites"] = {}
+    found = github.invitations(token)
+    if isinstance(found, github.Problem):
+        if found.code in (403, 404):
+            return [], ("If you have been invited to a book, sign out and sign "
+                        "in again, and the invitation will show here.")
+        return [], ""
+    out = []
+    for inv in found:
+        full = ((inv.get("repository") or {}).get("full_name")) or ""
+        book = next((b for b in books if b.same_repo(full)), None)
+        if book is None or not isinstance(inv.get("id"), int):
+            continue
+        CONSOLE["invites"][inv["id"]] = book.slug
+        item = book.describe()
+        item["invitation"] = inv["id"]
+        item["inviter"] = ((inv.get("inviter") or {}).get("login")) or ""
+        out.append(item)
+    return out, ""
+
+
+def r_books_accept(handler, data):
+    """Accept the invitation to one registered book, then choose that book."""
+    token = _token()
+    if not token:
+        _needs_signin()
+    try:
+        ident = int(data.get("invitation"))
+    except (TypeError, ValueError):
+        raise KeyError("That invitation isn't one this app listed. Please look "
+                       "at the list of books again.")
+    slug = CONSOLE["invites"].get(ident)
+    if slug is None:
+        raise KeyError("That invitation isn't one this app listed. Please look "
+                       "at the list of books again.")
+    _unwrap(github.accept_invitation(token, ident))
+    CONSOLE["invites"].pop(ident, None)
+    try:
+        book = registry.get().resolve(slug)
+    except registry.RegistryError as e:
+        raise KeyError(str(e))
+    CONSOLE["access"].pop(book.slug, None)
+    _check_access(token, [book])
+    return {"accepted": True, "slug": book.slug, "title": book.title,
+            "access": _known_access(book.slug)}
 
 
 def r_books_choose(handler, data):
@@ -1280,6 +1380,7 @@ CONSOLE = {
     "access": {},     # book slug -> "write", "read" or "none", checked this run
     "loaded": None,   # the suggestions last shown: {"slug", "suggestions"}
     "plans": {},      # (book slug, suggestion number) -> the change worked out
+    "invites": {},    # invitation id -> book slug, as last listed to the author
 }
 
 
@@ -2169,6 +2270,7 @@ ROUTES = {
     "/api/vault/close": r_vault_close,
     "/api/books": r_books,
     "/api/books/choose": r_books_choose,
+    "/api/books/accept": r_books_accept,
     "/api/account": r_account,
 
     "/api/console/status": r_console_status,

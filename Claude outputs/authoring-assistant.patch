@@ -1,0 +1,796 @@
+From 7a13ba536befb69bb9552ee8316b4a488ddc4801 Mon Sep 17 00:00:00 2001
+From: Alec Gordon <alecg95@gmail.com>
+Date: Thu, 24 Sep 2026 21:04:29 +0200
+Subject: [PATCH] Authoring Assistant: a new chapter's front-page line; accept
+ the invitation to your book in the app
+
+Send to drafts, for a NEW chapter, adds one line under the front page's
+Contents in the same commit (app/contents.py), shown before sending; every
+other line of index.md goes back byte for byte. Sign-in asks for repo:invite
+as well as public_repo, and the book list offers invitations to registered
+books only; accepting chooses the book.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018UfPMbuFVLu4XgLaag8qvX
+---
+ BUILD.md           |  13 +++--
+ README.md          |  14 +++++
+ app/contents.py    | 106 +++++++++++++++++++++++++++++++++++++
+ app/drafts.py      |  23 ++++++--
+ app/github.py      |  22 +++++++-
+ app/server.py      | 112 +++++++++++++++++++++++++++++++++++++--
+ app/web/app.js     |  40 +++++++++++++-
+ app/web/index.html |   5 ++
+ tests/test_all.py  | 128 ++++++++++++++++++++++++++++++++++++++++++++-
+ tests/ui_flow.js   |  28 +++++++++-
+ 10 files changed, 474 insertions(+), 17 deletions(-)
+ create mode 100644 app/contents.py
+
+diff --git a/BUILD.md b/BUILD.md
+index 6dc320d..ac58a04 100644
+--- a/BUILD.md
++++ b/BUILD.md
+@@ -384,10 +384,15 @@ work again (`drafts.send`, `MOVED*`).
+ 
+ ### The scope, and why it is narrow
+ 
+-`app/github.py` requests **`public_repo`**, not `repo`. The textbook repo is
+-public, and `public_repo` still allows closing a suggestion, replying, and
+-accepting a draft change — while giving no access whatsoever to any private
+-repository the author owns. Do not widen this without a reason.
++`app/github.py` requests **`public_repo repo:invite`**, not `repo`. The
++textbook repo is public, and `public_repo` still allows closing a suggestion,
++replying, and accepting a draft change — while giving no access whatsoever to
++any private repository the author owns. `repo:invite` was added (Sep 2026) so an
++author set up by book-requests accepts the invitation to their book in the
++book list instead of on GitHub's website; it can accept or decline invitations
++and nothing else, and the app only ever lists and accepts invitations to books
++in the registry. A sign-in from before it was added keeps working and is told to
++sign in again to see invitations. Do not widen this further without a reason.
+ 
+ ### Revoking
+ 
+diff --git a/README.md b/README.md
+index fbbdb8b..1f75aa9 100644
+--- a/README.md
++++ b/README.md
+@@ -88,6 +88,12 @@ anyone else's work.
+ If your account can't make changes to the book, the tool says so before you
+ start, not at the end.
+ 
++**An invitation to your book.** When a book is set up for you, you are
++invited to it. After you sign in, the invitation shows at the top of the list
++of books: press it to accept, and the book is chosen straight away. Nothing
++needs doing on GitHub's website. Only invitations to textbooks on the platform
++are shown.
++
+ **Download a copy** (under the choices) puts every file of the book, as the
+ drafts area holds them, into a new folder on this Mac. It never writes over a
+ folder that is already there.
+@@ -150,6 +156,14 @@ is, and you can go back to it at any time.
+ 
+ ### Sending it to the drafts area
+ 
++A **new** chapter also gets one line on the book's front page, under
++“Contents”, in the same change, so readers can find it there:
++`- **[[chapters/Chapter 7|Chapter 7: Its title]]**`. You see the line before
++you send, and nothing else on the front page changes. Bringing in a chapter
++that is already there leaves the front page alone. With no “Contents” heading
++on the front page, nothing is added and you are told.
++
++
+ If you are signed in to the console and can make changes to the book, the
+ converted chapter can also go straight to the book's **drafts area**, the same
+ place accepted changes, and browser edits once published, go to. Press **Send to drafts** instead of, or as
+diff --git a/app/contents.py b/app/contents.py
+new file mode 100644
+index 0000000..28e9126
+--- /dev/null
++++ b/app/contents.py
+@@ -0,0 +1,106 @@
++"""
++A new chapter's line on the book's front page.
++
++A chapter brought in from Word reaches the book, its search and its graph, but
++readers find chapters from the front page's "Contents" list, and before this
++the author had to add that line by hand. Sending a NEW chapter to the drafts
++area now adds it, in the same commit, and the author sees the line first.
++
++The same rules as every other edit here:
++
++  * Only one line is added. Every other line of index.md goes back byte for
++    byte, line endings included.
++  * Never guessed. No "## Contents" heading, or the chapter already linked
++    under it: nothing is added, and the author is told why.
++
++The line's shape is the template's own (textbook-template/scripts/seed-index.md):
++    - **[[chapters/Chapter 3|Chapter 3: Reality and the Problem]]**
++book-requests' provisioning calls add_line() too, so a book set up from a
++request and a chapter added later read the same.
++"""
++
++import re
++
++HEADING = re.compile(r"^##\s+Contents\s*$", re.IGNORECASE)
++SECTION_END = re.compile(r"^(#{1,2}\s|---\s*$)")
++ITEM = re.compile(r"^[-*]\s")
++
++
++def chapter_title(text, md_name):
++    """The chapter's first "# Heading", else its file name without .md."""
++    for line in text.splitlines():
++        m = re.match(r"^#\s+(.+?)\s*#*\s*$", line)
++        if m:
++            title = re.sub(r"\*\*|__|[*_`]", "", m.group(1))
++            title = re.sub(r"\s+", " ", title).strip()
++            if title:
++                return title
++    name = md_name.rsplit("/", 1)[-1]
++    return re.sub(r"\.(md|markdown)$", "", name, flags=re.IGNORECASE) or "Untitled chapter"
++
++
++def link_target(chapter_path):
++    """chapters/Chapter 3.md -> chapters/Chapter 3 (a wikilink names no .md)."""
++    return re.sub(r"\.(md|markdown)$", "", chapter_path, flags=re.IGNORECASE)
++
++
++def line_for(chapter_path, title):
++    # "|" ends a wikilink's target and "]]" the link: neither may be in the label.
++    label = title.replace("|", "-").replace("]]", "] ]").replace("[[", "[ [")
++    return f"- **[[{link_target(chapter_path)}|{label}]]**"
++
++
++def add_line(index_text, chapter_path, title):
++    """(new index text, None), or (None, why in the author's words).
++
++    The line goes after the last item already under "## Contents", or straight
++    under the heading when the list is empty.
++    """
++    lines = index_text.splitlines(keepends=True)
++    eol = "\r\n" if "\r\n" in index_text else "\n"
++
++    start = next((i for i, l in enumerate(lines) if HEADING.match(l.rstrip("\r\n"))), None)
++    if start is None:
++        return None, ("The front page has no “Contents” heading, so no line was "
++                      "added for this chapter. Add a link to it on the front "
++                      "page yourself if you want readers to find it there.")
++    end = next((i for i in range(start + 1, len(lines))
++                if SECTION_END.match(lines[i].rstrip("\r\n"))), len(lines))
++
++    target = link_target(chapter_path)
++    for l in lines[start + 1:end]:
++        if f"[[{target}|" in l or f"[[{target}]]" in l:
++            return None, "The front page already lists this chapter under “Contents”."
++
++    # After the last item and any lines indented under it (its description).
++    last = None
++    for i in range(start + 1, end):
++        text = lines[i].rstrip("\r\n")
++        if ITEM.match(text):
++            last = i
++        elif last is not None and text.startswith((" ", "\t")) and text.strip():
++            last = i
++    new = line_for(chapter_path, chapter_title_safe(title)) + eol
++
++    if last is not None:
++        if not lines[last].endswith(("\n", "\r")):
++            lines[last] += eol
++        lines.insert(last + 1, new)
++    else:
++        # An empty list: under the heading, with a blank line either side.
++        if not lines[start].endswith(("\n", "\r")):
++            lines[start] += eol
++        at = start + 1
++        block = [new]
++        if at < len(lines) and not lines[at].strip():
++            at += 1                      # keep the blank line already there
++        else:
++            block.insert(0, eol)
++        if at < len(lines) and lines[at].strip():
++            block.append(eol)
++        lines[at:at] = block
++    return "".join(lines), None
++
++
++def chapter_title_safe(title):
++    return re.sub(r"\s+", " ", title or "").strip() or "Untitled chapter"
+diff --git a/app/drafts.py b/app/drafts.py
+index 5ac4e54..2616d1e 100644
+--- a/app/drafts.py
++++ b/app/drafts.py
+@@ -69,6 +69,18 @@ def repo_paths(root, folder, md_name):
+     return tuple(out)
+ 
+ 
++def index_path(root, folder):
++    """Where the book's front page sits in the repository: index.md at the top
++    of the vault the chapter is going into. None when that is outside `root`."""
++    vault = convert.find_vault_root(folder)
++    if vault is None:
++        return None
++    rel = os.path.relpath(os.path.join(vault, "index.md"), os.path.abspath(root))
++    if rel.startswith("..") or os.path.isabs(rel):
++        return None
++    return rel.replace(os.sep, "/")
++
++
+ def pictures(result):
+     """{path inside the pictures folder: bytes} for what the import pulled out."""
+     base = os.path.join(result["stage"], convert.STAGE_MEDIA)
+@@ -229,11 +241,12 @@ def edit_entries(snap, changed):
+     return entries
+ 
+ 
+-def read(token, book, chapter_path, media_dir):
++def read(token, book, chapter_path, media_dir, index=None):
+     """What drafts holds now where this chapter is going.
+ 
+     Returns a state dict, or a Problem. `refused` is set, in the author's
+-    words, when the chapter must not be sent there at all.
++    words, when the chapter must not be sent there at all. With `index` (the
++    front page's path), `index_sha` is its blob in this same listing, or None.
+     """
+     listing = _listing(token, book)
+     if isinstance(listing, github.Problem):
+@@ -241,7 +254,11 @@ def read(token, book, chapter_path, media_dir):
+     head, tree_sha, files = listing
+ 
+     state = {"head": head, "tree": tree_sha, "on_drafts": {},
+-             "exists": False, "last": None, "old_text": None, "refused": None}
++             "exists": False, "last": None, "old_text": None, "refused": None,
++             "index_sha": None}
++    front = files.get(index) if index else None
++    if front is not None and front.get("type") == "blob":
++        state["index_sha"] = front.get("sha")
+     chapter = files.get(chapter_path)
+     if chapter is not None and chapter.get("type") != "blob":
+         state["refused"] = (
+diff --git a/app/github.py b/app/github.py
+index 4385b04..9ff67fc 100644
+--- a/app/github.py
++++ b/app/github.py
+@@ -40,7 +40,11 @@ TOKEN_URL = "https://github.com/login/oauth/access_token"
+ # Every registered repository is public, so this is the narrowest scope that still allows
+ # closing a suggestion, leaving a reply, and accepting a draft change. It
+ # deliberately gives no access to any private work the author may have.
+-SCOPE = "public_repo"
++# repo:invite lets the author accept the invitation to their own book here, in
++# the book list, instead of on GitHub's website (book-requests invites the
++# author when it sets a book up). It can accept or decline invitations and
++# nothing else.
++SCOPE = "public_repo repo:invite"
+ 
+ USER_AGENT = "Authoring-Assistant"
+ TIMEOUT = 30
+@@ -243,6 +247,22 @@ def whoami(token):
+     }
+ 
+ 
++def invitations(token):
++    """Invitations waiting for the signed-in author, as the service lists them,
++    or a Problem. A sign-in from before repo:invite was asked for gets a 403."""
++    result = _request("GET", f"{API}/user/repository_invitations?per_page=100",
++                      token=token)
++    if isinstance(result, Problem):
++        return result
++    return [i for i in result if isinstance(i, dict)] if isinstance(result, list) else []
++
++
++def accept_invitation(token, invitation_id):
++    """Accept one invitation. {} on success, or a Problem."""
++    return _request("PATCH", f"{API}/user/repository_invitations/{int(invitation_id)}",
++                    token=token)
++
++
+ def repo_access(token, book):
+     """Whether the signed-in author can act on this book.
+ 
+diff --git a/app/server.py b/app/server.py
+index 46df870..cd7e46b 100644
+--- a/app/server.py
++++ b/app/server.py
+@@ -17,8 +17,8 @@ import time
+ import webbrowser
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ 
+-from . import (config, console, convert, drafts, github, keychain, llm,
+-               picker, registry)
++from . import (config, console, contents, convert, drafts, github, keychain,
++               llm, picker, registry)
+ from .session import DraftsSession, Session
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+@@ -826,21 +826,58 @@ def _drafts_plan(token, book, result):
+         raise KeyError("Where this chapter is going isn't inside the book's "
+                        "folder, so it can't be sent. Nothing was sent.")
+     chapter_path, media_dir = paths
+-    state = _unwrap(drafts.read(token, book, chapter_path, media_dir))
++    index = drafts.index_path(result["vault"], IMPORT["folder"])
++    state = _unwrap(drafts.read(token, book, chapter_path, media_dir, index))
+     entries = []
+     if not state["refused"]:
+         entries = drafts.build_tree(chapter_path,
+                                     result["text"].encode("utf-8"), media_dir,
+                                     drafts.pictures(result),
+                                     state["on_drafts"])
++    front = None
++    if entries and not state["refused"] and not state["exists"]:
++        front = _contents_entry(token, book, state, index, chapter_path,
++                                result["text"], result["md_name"])
++        if front.get("entry"):
++            entries.append(front.pop("entry"))
+     result["drafts"] = {"book": book.slug, "state": state, "entries": entries,
+-                        "chapter_path": chapter_path}
++                        "chapter_path": chapter_path, "contents": front}
+     shown = drafts.describe(book, state, entries, chapter_path, media_dir,
+                             result["text"])
++    shown["contents"] = front
+     shown["head"] = state["head"]
+     return shown
+ 
+ 
++def _contents_entry(token, book, state, index, chapter_path, text, md_name):
++    """A new chapter's line under the front page's "Contents" (contents.py).
++
++    {"line", "entry"} when one is added, or {"note"} saying why not. The
++    front page is read from the same listing the chapter was checked against,
++    so the commit is of one consistent drafts area.
++    """
++    if not index or not state.get("index_sha"):
++        return {"note": "The book has no front page (index.md) in the drafts "
++                        "area, so no line was added for this chapter."}
++    data = github.blob_bytes(token, book, state["index_sha"])
++    old = None if isinstance(data, github.Problem) else drafts.text_of(data)
++    if old is None:
++        return {"note": "The front page could not be read just now, so no "
++                        "line was added for this chapter. Add it yourself, "
++                        "or send the chapter again later."}
++    target = chapter_path
++    top = index.rsplit("/", 1)[0] + "/" if "/" in index else ""
++    if top and target.startswith(top):
++        target = target[len(top):]      # links are from the front page's folder
++    title = contents.chapter_title(text, md_name)
++    new, why = contents.add_line(old, target, title)
++    if new is None:
++        return {"note": why}
++    data = new.encode("utf-8")
++    return {"line": contents.line_for(target, title), "path": index,
++            "entry": {"path": index, "sha": drafts.blob_sha(data), "data": data}}
++
++
+ def r_import_drafts_check(handler, data):
+     """What sending would do. Reads the drafts area; changes nothing."""
+     token = _token()
+@@ -904,6 +941,7 @@ def r_import_drafts_send(handler, data):
+         "files": len(plan["entries"]) - len(removed),
+         "removed": len(removed),
+         "saved": result.get("saved"),
++        "contents": bool((plan.get("contents") or {}).get("line")),
+     }
+ 
+ 
+@@ -1210,8 +1248,10 @@ def r_books(handler, data):
+     books = reg.active()
+     offline = False
+     note = ""
++    invites, invite_note = [], ""
+     problem = _ensure_login(token)
+     if problem is None:
++        invites, invite_note = _book_invitations(token, books)
+         problem = _check_access(token, books)
+     if problem is not None:
+         offline = problem.offline
+@@ -1225,6 +1265,7 @@ def r_books(handler, data):
+                if when else "it isn't known yet which books you can change.")
+         )
+ 
++    invited = {i["slug"] for i in invites}
+     shown, hidden = [], 0
+     for book in books:
+         level = _known_access(book.slug)
+@@ -1232,17 +1273,76 @@ def r_books(handler, data):
+             item = book.describe()
+             item["access"] = level
+             shown.append(item)
+-        else:
++        elif book.slug not in invited:
+             hidden += 1
++    invites = [i for i in invites
++               if not any(b["slug"] == i["slug"] for b in shown)]
+     return {
+         "books": shown,
+         "hidden": hidden,
++        "invitations": invites,
++        "invite_note": invite_note,
+         "offline": offline,
+         "note": note,
+         "workspace": _workspace_info(),
+     }
+ 
+ 
++def _book_invitations(token, books):
++    """Invitations to registered books waiting for this author: ([...], note).
++
++    Only invitations to a book in the registry are offered; any other
++    invitation the account has is none of this app's business and is never
++    shown or touched. A sign-in from before the app could accept invitations
++    is told how to get them, and nothing else changes.
++    """
++    CONSOLE["invites"] = {}
++    found = github.invitations(token)
++    if isinstance(found, github.Problem):
++        if found.code in (403, 404):
++            return [], ("If you have been invited to a book, sign out and sign "
++                        "in again, and the invitation will show here.")
++        return [], ""
++    out = []
++    for inv in found:
++        full = ((inv.get("repository") or {}).get("full_name")) or ""
++        book = next((b for b in books if b.same_repo(full)), None)
++        if book is None or not isinstance(inv.get("id"), int):
++            continue
++        CONSOLE["invites"][inv["id"]] = book.slug
++        item = book.describe()
++        item["invitation"] = inv["id"]
++        item["inviter"] = ((inv.get("inviter") or {}).get("login")) or ""
++        out.append(item)
++    return out, ""
++
++
++def r_books_accept(handler, data):
++    """Accept the invitation to one registered book, then choose that book."""
++    token = _token()
++    if not token:
++        _needs_signin()
++    try:
++        ident = int(data.get("invitation"))
++    except (TypeError, ValueError):
++        raise KeyError("That invitation isn't one this app listed. Please look "
++                       "at the list of books again.")
++    slug = CONSOLE["invites"].get(ident)
++    if slug is None:
++        raise KeyError("That invitation isn't one this app listed. Please look "
++                       "at the list of books again.")
++    _unwrap(github.accept_invitation(token, ident))
++    CONSOLE["invites"].pop(ident, None)
++    try:
++        book = registry.get().resolve(slug)
++    except registry.RegistryError as e:
++        raise KeyError(str(e))
++    CONSOLE["access"].pop(book.slug, None)
++    _check_access(token, [book])
++    return {"accepted": True, "slug": book.slug, "title": book.title,
++            "access": _known_access(book.slug)}
++
++
+ def r_books_choose(handler, data):
+     """Choose the book. This, not an open vault, decides which book it is.
+ 
+@@ -1280,6 +1380,7 @@ CONSOLE = {
+     "access": {},     # book slug -> "write", "read" or "none", checked this run
+     "loaded": None,   # the suggestions last shown: {"slug", "suggestions"}
+     "plans": {},      # (book slug, suggestion number) -> the change worked out
++    "invites": {},    # invitation id -> book slug, as last listed to the author
+ }
+ 
+ 
+@@ -2169,6 +2270,7 @@ ROUTES = {
+     "/api/vault/close": r_vault_close,
+     "/api/books": r_books,
+     "/api/books/choose": r_books_choose,
++    "/api/books/accept": r_books_accept,
+     "/api/account": r_account,
+ 
+     "/api/console/status": r_console_status,
+diff --git a/app/web/app.js b/app/web/app.js
+index 26c8343..73b3012 100644
+--- a/app/web/app.js
++++ b/app/web/app.js
+@@ -842,6 +842,13 @@ function renderDrafts(d) {
+       'earlier import and aren\'t in this one, so they will be taken out: ' +
+       d.removed.join(', ') + '.'));
+   }
++  if (d.contents && d.contents.line && !d.refused && !d.nothing_to_send) {
++    removed.appendChild(el('li', '', 'So readers can find it, the front page gets one new ' +
++      'line under “Contents”, in the same change: ' + d.contents.line +
++      ' Nothing else on the front page changes.'));
++  } else if (d.contents && d.contents.note && !d.refused && !d.nothing_to_send) {
++    removed.appendChild(el('li', '', d.contents.note));
++  }
+   document.getElementById('import-drafts-problem').textContent = d.refused || '';
+   document.getElementById('import-replace-label').classList.toggle(
+     'hidden', !(d.exists && !d.refused && !d.nothing_to_send));
+@@ -938,6 +945,8 @@ function renderImportDone() {
+       `in one change made by you` +
+       (s.removed ? `, which also took out ${s.removed} picture${s.removed === 1 ? '' : 's'} ` +
+         'the Word document no longer has' : '') + '.'));
++    if (s.contents) list.appendChild(el('li', '',
++      'The front page lists it under “Contents”, in the same change.'));
+     list.appendChild(el('li', '', 'Readers don\'t see it until the drafts go live.'));
+   }
+   list.appendChild(el('li', '',
+@@ -1336,6 +1345,23 @@ async function openBookPicker() {
+     note.textContent = r.note;
+     note.classList.remove('hidden');
+   }
++  const invites = document.getElementById('books-invites');
++  invites.innerHTML = '';
++  const inv = r.invitations || [];
++  document.getElementById('books-invites-box').classList.toggle('hidden', !inv.length);
++  inv.forEach(b => {
++    const li = el('li');
++    const btn = el('button');
++    btn.appendChild(el('strong', '', b.title));
++    btn.appendChild(el('span', 'who', 'Accept the invitation and start working on it' +
++      (b.inviter ? ' · from ' + b.inviter : '')));
++    btn.onclick = () => acceptInvitation(b.invitation, btn);
++    li.appendChild(btn);
++    invites.appendChild(li);
++  });
++  const inviteNote = document.getElementById('books-invite-note');
++  inviteNote.textContent = r.invite_note || '';
++  inviteNote.classList.toggle('hidden', !r.invite_note);
+   r.books.forEach(b => {
+     const li = el('li');
+     const btn = el('button');
+@@ -1346,7 +1372,7 @@ async function openBookPicker() {
+     li.appendChild(btn);
+     list.appendChild(li);
+   });
+-  if (!r.books.length) {
++  if (!r.books.length && !inv.length) {
+     list.appendChild(el('li', 'none',
+       'Your account can’t make changes to any registered book. The book’s maintainer can give you access.'));
+   }
+@@ -1359,6 +1385,18 @@ async function openBookPicker() {
+   }
+ }
+ 
++async function acceptInvitation(id, btn) {
++  if (btn) btn.disabled = true;
++  let r;
++  try { r = await api('/api/books/accept', { invitation: id }); } catch (e) {
++    if (btn) btn.disabled = false;
++    return fail(e.message);
++  }
++  // Accepted: the book is theirs to work on, so it is chosen straight away.
++  if (r.access === 'write') return chooseBook(r.slug);
++  return openBookPicker();
++}
++
+ async function chooseBook(slug) {
+   const hadVault = !!WS.vault;
+   try {
+diff --git a/app/web/index.html b/app/web/index.html
+index ddb07f1..469e238 100644
+--- a/app/web/index.html
++++ b/app/web/index.html
+@@ -494,6 +494,11 @@
+   </div>
+ 
+   <p class="notice hidden" id="books-note"></p>
++  <div id="books-invites-box" class="hidden">
++    <p class="card-label">You have been invited</p>
++    <ul class="queue" id="books-invites"></ul>
++  </div>
++  <p class="quiet hidden" id="books-invite-note"></p>
+   <ul class="queue" id="books-list"></ul>
+   <p class="quiet" id="books-hidden"></p>
+   <p class="hidden" id="books-other-account"><button class="link"
+diff --git a/tests/test_all.py b/tests/test_all.py
+index 493de23..f4ce2a8 100644
+--- a/tests/test_all.py
++++ b/tests/test_all.py
+@@ -1192,7 +1192,7 @@ check("nothing waiting to go live means no pull request is opened",
+ 
+ 
+ check("the scope asked for excludes the author's private work",
+-      _github.SCOPE == "public_repo", _github.SCOPE)
++      _github.SCOPE.split() == ["public_repo", "repo:invite"], _github.SCOPE)
+ check("all four weekly jobs are known to the console",
+       len(_github.WEEKLY_JOBS) == 4, len(_github.WEEKLY_JOBS))
+ 
+@@ -1429,6 +1429,64 @@ check("choosing a book makes it the one on screen",
+ check("the choice is remembered for next time",
+       _config.read_state().get("last_book") == "book-a")
+ 
++# Invitations: the author accepts the one to their book in the book list.
++class _Invites(_Books):
++    def __init__(self, perms, listing, **kw):
++        super().__init__(dict(perms), **kw)
++        self.listing = listing
++
++    def request(self, method, url, token=None, payload=None, accept=None):
++        if url.startswith(f"{_github.API}/user/repository_invitations"):
++            self.calls.append((method, url, payload))
++            if isinstance(self.listing, _github.Problem):
++                return self.listing
++            if method == "PATCH":
++                ident = int(url.rsplit("/", 1)[1])
++                inv = next(i for i in self.listing if i["id"] == ident)
++                self.perms[inv["repository"]["full_name"]] = "write"
++                self.listing = [i for i in self.listing if i["id"] != ident]
++                return {}
++            return list(self.listing)
++        return super().request(method, url, token, payload, accept)
++
++
++_LISTING = [
++    {"id": 11, "repository": {"full_name": "example-org/book-b"},
++     "inviter": {"login": "platform"}},
++    {"id": 12, "repository": {"full_name": "stranger/not-a-book"},
++     "inviter": {"login": "someone"}},
++]
++_inv = _Invites(_PERMS, _LISTING)
++_server.CONSOLE.update(access={})
++_bk = _with_service(_inv, lambda: _server.r_books(None, {}))
++check("an invitation to a registered book is offered in the book list",
++      [(i["slug"], i["invitation"], i["inviter"]) for i in _bk["invitations"]]
++      == [("book-b", 11, "platform")], _bk["invitations"])
++check("an invitation to anything else is never shown",
++      all(i["invitation"] != 12 for i in _bk["invitations"]))
++check("the invited book isn't counted among the books left out",
++      _bk["hidden"] == 1, _bk["hidden"])
++check("an invitation this app didn't list can't be accepted through it",
++      "isn't one this app listed" in (_refused(lambda: _with_service(
++          _inv, lambda: _server.r_books_accept(None, {"invitation": 12}))) or "")
++      and not any(c[0] == "PATCH" for c in _inv.calls))
++_acc = _with_service(_inv, lambda: _server.r_books_accept(None, {"invitation": 11}))
++check("accepting makes the book the author's to change, straight away",
++      _acc["slug"] == "book-b" and _acc["access"] == "write"
++      and [c[1] for c in _inv.calls if c[0] == "PATCH"]
++      == [f"{_github.API}/user/repository_invitations/11"], _acc)
++_bk = _with_service(_inv, lambda: _server.r_books(None, {}))
++check("and it is then an ordinary book in the list, with no invitation left",
++      "book-b" in [b["slug"] for b in _bk["books"]] and not _bk["invitations"], _bk)
++_server.CONSOLE.update(access={})
++_old = _Invites(_PERMS, _github.Problem("no scope", code=403))
++_bk = _with_service(_old, lambda: _server.r_books(None, {}))
++check("a sign-in from before invitations is told how to see them, and nothing breaks",
++      "sign in again" in _bk["invite_note"] and not _bk["invitations"]
++      and [b["slug"] for b in _bk["books"]] == ["book-a"], _bk)
++_server.CONSOLE.update(access={})
++_with_service(_Books(_PERMS), lambda: _server.r_books(None, {}))
++
+ _access_err = _with_service(
+     _Books({"example-org/book-a": 500}),
+     lambda: _github.repo_access("t", _BOOK))
+@@ -2183,6 +2241,74 @@ _again = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_
+ check("sending the same import again finds nothing to send",
+       _again["nothing_to_send"] and _again["exists"], _again)
+ 
++# --- a new chapter's line on the front page (contents.py) ---------------------
++
++from app import contents as _contents
++
++_SEED = ("---\nauthors:\n  - \"A\"\n---\n\n# Book\n\n## Contents\n\n"
++         "- **[[chapters/chapter-01|Chapter 1 — One]]**\n  What it does.\n\n"
++         "## Concept index\n\n- [[Example concept]]\n")
++_new, _why = _contents.add_line(_SEED, "chapters/Chapter 7.md", "Chapter 7: Seven")
++check("a new chapter's line goes after the last item under Contents",
++      _new == _SEED.replace("  What it does.\n",
++                            "  What it does.\n- **[[chapters/Chapter 7|Chapter 7: Seven]]**\n"),
++      repr(_new))
++_old_lines = _SEED.splitlines(keepends=True)
++_new_lines = _new.splitlines(keepends=True)
++check("and it is the only line that changes",
++      len(_new_lines) == len(_old_lines) + 1
++      and [l for l in _new_lines if l not in _old_lines]
++      == ["- **[[chapters/Chapter 7|Chapter 7: Seven]]**\n"])
++check("line endings are kept",
++      _contents.add_line(_SEED.replace("\n", "\r\n"), "chapters/X.md", "X")[0]
++      == _new.replace("Chapter 7|Chapter 7: Seven", "X|X").replace("\n", "\r\n")
++      .replace("chapters/Chapter 7", "chapters/X"))
++check("a chapter already listed is not listed twice",
++      _contents.add_line(_new, "chapters/Chapter 7.md", "Seven")[0] is None)
++check("no Contents heading: nothing is added, and the author is told",
++      _contents.add_line("# Book\n\nText.\n", "chapters/X.md", "X")[0] is None
++      and "no “Contents” heading" in _contents.add_line("# B\n", "chapters/X.md", "X")[1])
++check("an empty Contents list gets the line under its heading",
++      _contents.add_line("## Contents\n\n## Next\n", "chapters/X.md", "X")[0]
++      == "## Contents\n\n- **[[chapters/X|X]]**\n\n## Next\n")
++check("a | in the title can't break the link",
++      _contents.line_for("chapters/X.md", "A | B") == "- **[[chapters/X|A - B]]**")
++check("the title is the chapter's first heading, else its file name",
++      _contents.chapter_title("Intro\n# **Chapter 3**: Reality\n", "c.md")
++      == "Chapter 3: Reality"
++      and _contents.chapter_title("No heading.", "Chapter 9.md") == "Chapter 9")
++
++_repo_ix = _GitRepo("example-org/book-a", dict(_DRAFTS_START, **{"index.md": _SEED}))
++_res = _converted(_wch, _wa, "Chapter 9.md", {})
++_look = _with_service(_repo_ix, lambda: _server.r_import_drafts_check(None, dict(_A)))
++check("a new chapter's check shows the front-page line it will add",
++      (_look.get("contents") or {}).get("line")
++      == "- **[[chapters/Chapter 9|Chapter 9]]**", _look.get("contents"))
++_sent = _with_service(_repo_ix, lambda: _server.r_import_drafts_send(
++    None, dict(_A, head=_look["head"])))
++_after = _repo_ix.files()
++check("and sends the chapter and that one line in the same commit",
++      _sent["sent"] and _sent["contents"]
++      and _after["index.md"].decode() == _SEED.replace(
++          "  What it does.\n",
++          "  What it does.\n- **[[chapters/Chapter 9|Chapter 9]]**\n")
++      and "chapters/Chapter 9.md" in _after, _after.get("index.md"))
++_res = _converted(_wch, _wa, "Chapter 9.md", {})
++_res["text"] = "# Chapter 9\n\nRevised in Word.\n"
++_before_ix = _repo_ix.files()["index.md"]
++_look = _with_service(_repo_ix, lambda: _server.r_import_drafts_check(None, dict(_A)))
++check("bringing the same chapter in again leaves the front page alone",
++      _look["exists"] and not _look.get("contents"), _look.get("contents"))
++_with_service(_repo_ix, lambda: _server.r_import_drafts_send(
++    None, dict(_A, head=_look["head"], replace=True)))
++check("and the front page is byte-identical after the replacement",
++      _repo_ix.files()["index.md"] == _before_ix)
++_res = _converted(_wch, _wa, "Chapter 10.md", {})
++_look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
++check("a book with no front page on drafts: the chapter still goes, with a note",
++      (_look.get("contents") or {}).get("note") and not _look["refused"]
++      and not _look["nothing_to_send"], _look.get("contents"))
++
+ # The same, from a real Word document, when this machine has pandoc.
+ if _pandoc:
+     _png_src = os.path.join(_wch, "fig.png")
+diff --git a/tests/ui_flow.js b/tests/ui_flow.js
+index d66797f..a9653ad 100644
+--- a/tests/ui_flow.js
++++ b/tests/ui_flow.js
+@@ -119,8 +119,9 @@ const DRAFTS_LOOK = {
+   chapter_path: 'chapters/Chapter 6.md', media_dir: 'assets/Chapter 6',
+   refused: null, exists: false, last: null, nothing_to_send: false,
+   removed: [], changed_lines: null,
++  contents: { line: '- **[[chapters/Chapter 6|Chapter 6]]**', path: 'index.md' },
+ };
+-const DRAFTS_MOVED = Object.assign({}, DRAFTS_LOOK, {
++const DRAFTS_MOVED = Object.assign({}, DRAFTS_LOOK, { contents: null,
+   head: 'h2', exists: true, removed: ['image2.png'],
+   changed_lines: { removed: 3, added: 4 },
+   last: { who: 'cms-user', when: '2026-09-22T10:00:00Z', message: 'Update Chapter 6' },
+@@ -212,7 +213,12 @@ const fetch = async (route, opts) => {
+ 
+     '/api/workspace': CURRENT_WS,
+     '/api/books': { books: [BOOK_A], hidden: 2, offline: false, note: '',
+-                    workspace: CURRENT_WS },
++                    invitations: [{ slug: 'book-b', title: 'Book B',
++                                    repo: 'example-org/book-b', invitation: 11,
++                                    inviter: 'platform' }],
++                    invite_note: '', workspace: CURRENT_WS },
++    '/api/books/accept': { accepted: true, slug: 'book-b', title: 'Book B',
++                           access: 'write' },
+     '/api/books/choose': CURRENT_WS,
+     '/api/vault/close': CURRENT_WS,
+     '/api/books/switch': CURRENT_WS,
+@@ -512,6 +518,10 @@ function check(name, cond, got) {
+         els['import-drafts-where'].textContent.includes('chapters/Chapter 6.md') &&
+         els['import-drafts-where'].textContent.includes('“drafts”'),
+         els['import-drafts-where'].textContent);
++  check('a new chapter shows the one line the front page gets under Contents',
++        said(els['import-drafts-removed']).includes('[[chapters/Chapter 6|Chapter 6]]') &&
++        said(els['import-drafts-removed']).includes('Nothing else on the front page changes'),
++        said(els['import-drafts-removed']));
+   check('nothing is sent until the author says they have looked',
+         els['do-send-drafts'].disabled === true, els['do-send-drafts'].disabled);
+   els['import-confirm'].checked = true;
+@@ -602,6 +612,20 @@ function check(name, cond, got) {
+         els['books-hidden'].textContent.includes('can’t make changes'),
+         els['books-hidden'].textContent);
+ 
++  check('an invitation to a book is offered above the list, with who sent it',
++        !els['books-invites-box'].classList.contains('hidden') &&
++        text(els['books-invites']).includes('Book B') &&
++        text(els['books-invites']).includes('platform'),
++        text(els['books-invites']));
++  await els['books-invites'].children[0].children[0].onclick();
++  await new Promise(r => setTimeout(r, 30));
++  check('accepting sends that invitation, then chooses the book straight away',
++        bodies['/api/books/accept'] && bodies['/api/books/accept'].invitation === 11 &&
++        bodies['/api/books/choose'] && bodies['/api/books/choose'].slug === 'book-b',
++        [bodies['/api/books/accept'], bodies['/api/books/choose']]);
++  await ctx.document.getElementById('go-console').onclick();
++  await new Promise(r => setTimeout(r, 30));
++
+   await els['books-list'].children[0].children[0].onclick();
+   await new Promise(r => setTimeout(r, 30));
+   check('choosing a book sends its name, and nothing else decides it',
+-- 
+2.43.0
+

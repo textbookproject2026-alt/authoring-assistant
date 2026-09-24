@@ -1,0 +1,46 @@
+From bcc4bf21c6cfdb61f92bfbe933b69f793c1914ed Mon Sep 17 00:00:00 2001
+From: Alec Gordon <alecg95@gmail.com>
+Date: Thu, 24 Sep 2026 21:03:30 +0200
+Subject: [PATCH] Portal: the request form asks for a GitHub username
+ (required), and points chapters at the app
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018UfPMbuFVLu4XgLaag8qvX
+---
+ scripts/build.mjs   | 4 ++--
+ test/build.test.mjs | 1 +
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/build.mjs b/scripts/build.mjs
+index 87412ce..a362d49 100644
+--- a/scripts/build.mjs
++++ b/scripts/build.mjs
+@@ -446,11 +446,11 @@ function renderRequest(endpoint, contact) {
+     field('title', 'Title of the book', text('title', 'title', ' required maxlength="200" autocomplete="off"')),
+     field('authors', 'Author or authors', text('authors', 'authors', ' required maxlength="300" autocomplete="name"'), 'Separate several names with commas.'),
+     field('email', 'Your email address', '<input id="rq-email" name="email" type="email" required maxlength="254" autocomplete="email">', 'Only we see it. It is never published.'),
++    field('github', 'Your GitHub username', text('github', 'github', ' required maxlength="39" autocomplete="off" spellcheck="false" autocapitalize="off"'), 'You work on your book in our app, which signs in with a free GitHub account. No account yet? Create one at <a href="https://github.com/signup">github.com/signup</a> and come back.'),
+     field('summary', 'What the book is about', '<textarea id="rq-summary" name="summary" rows="3" required minlength="20" maxlength="300"></textarea>', 'One or two sentences, up to 300 characters. This becomes the book&#39;s description on this page.'),
+     field('topic', 'Subject area <span class="rq-optional">(optional)</span>', text('topic', 'topic', ' maxlength="60"'), 'For example: sociology, ecology, music theory.'),
+-    field('files', 'Manuscript <span class="rq-optional">(optional)</span>', '<input id="rq-files" name="files" type="file" multiple accept=".docx,.md,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown">', 'Word (.docx) or Markdown (.md), up to five files and 3 MB in total. One file per chapter works best. Or leave it empty and write in the browser once the book exists.'),
++    field('files', 'Manuscript <span class="rq-optional">(optional)</span>', '<input id="rq-files" name="files" type="file" multiple accept=".docx,.md,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown">', 'Word (.docx) or Markdown (.md), up to five files and 3 MB in total. One file per chapter works best. Or leave it empty and add chapters from Word later, in the app.'),
+     field('link', 'Or a link to the manuscript <span class="rq-optional">(optional)</span>', '<input id="rq-link" name="manuscriptLink" type="url" maxlength="500" placeholder="https://">', 'For larger files: a shared folder or download link.'),
+-    field('github', 'GitHub username <span class="rq-optional">(optional)</span>', text('github', 'github', ' maxlength="39" autocomplete="off" spellcheck="false"'), 'If you have one, you get direct access to your book&#39;s source. Not needed.'),
+     field('notes', 'Anything else <span class="rq-optional">(optional)</span>', '<textarea id="rq-notes" name="notes" rows="3" maxlength="3000"></textarea>'),
+     '        <p class="rq-field rq-agree"><label><input name="agreeLicence" type="checkbox" required><span>The book may be published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>: anyone may share and adapt it, with credit, under the same licence.</span></label></p>',
+     '        <p class="rq-trap" aria-hidden="true"><label>Leave this empty <input name="website" type="text" tabindex="-1" autocomplete="off"></label></p>',
+diff --git a/test/build.test.mjs b/test/build.test.mjs
+index 2612cff..e084559 100644
+--- a/test/build.test.mjs
++++ b/test/build.test.mjs
+@@ -344,6 +344,7 @@ test('the request form is rendered with its endpoint, and left out without one',
+   assert.match(withForm, /id="publish"/);
+   assert.match(withForm, /data-endpoint="https:\/\/fn\.vercel\.app\/api\/request-book"/);
+   assert.match(withForm, /name="website"/); // honeypot
++  assert.match(withForm, /id="rq-github" name="github" type="text" required/);
+   assert.match(withForm, /mailto:hello@example\.org/);
+   assert.match(withForm, /href="#publish"/);
+   const without = renderPage({ books, sha: 'a'.repeat(40), css });
+-- 
+2.43.0
+

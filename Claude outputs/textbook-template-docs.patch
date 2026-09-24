@@ -1,0 +1,99 @@
+From 672b524379d7b3df5e6900a0fe6b8ea40f8cbbea Mon Sep 17 00:00:00 2001
+From: Alec Gordon <alecg95@gmail.com>
+Date: Thu, 24 Sep 2026 21:03:56 +0200
+Subject: [PATCH] docs: Send to drafts adds the front-page line; invitations in
+ the app; Edit this page on the seed front page
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018UfPMbuFVLu4XgLaag8qvX
+---
+ docs/the-authoring-app.md |  6 ++++++
+ docs/word-to-markdown.md  | 36 ++++++++++++++++++++----------------
+ scripts/seed-index.md     |  7 ++++---
+ 3 files changed, 30 insertions(+), 19 deletions(-)
+
+diff --git a/docs/the-authoring-app.md b/docs/the-authoring-app.md
+index bbdbc6e..93c9f8e 100644
+--- a/docs/the-authoring-app.md
++++ b/docs/the-authoring-app.md
+@@ -193,6 +193,12 @@ Everything in this half needs the internet. If you are offline it says so plainl
+ and **nothing can be accepted, declined or published** until you are back.
+ Everything under Chapters keeps working as normal.
+ 
++### Your invitation
++
++When the platform sets a book up for you, your GitHub account is invited to it.
++After you sign in, the invitation is at the top of the list of books: press it
++to accept, and the book is chosen. Nothing needs doing on GitHub's website.
++
+ ### Which book
+ 
+ Everything under **Waiting for you** belongs to **one book at a time**. The band
+diff --git a/docs/word-to-markdown.md b/docs/word-to-markdown.md
+index d2d9236..9221fed 100644
+--- a/docs/word-to-markdown.md
++++ b/docs/word-to-markdown.md
+@@ -373,22 +373,26 @@ Once the checklist passes:
+    yours should too. If a stray blank line or a duplicate title has been left at
+    the very top, delete it.
+ 
+-2. **Add the chapter to the front page.** Open **`index.md`** and add a bullet
+-   under **Contents**, copying the shape of the one already there:
+-
+-       - **[[chapter-05|Chapter 5 — Photosynthesis]]**
+-         One sentence saying what the chapter covers.
+-
+-3. **Get the chapter and its pictures into `drafts`.** The book is its
+-   repository on GitHub, and the chapter reaches readers only from there.
+-
+-   > **To confirm:** whether the app commits a converted chapter and its
+-   > `assets/<chapter-name>/` pictures to `drafts` itself (the platform's plan
+-   > calls this "Send to drafts", BOOK-ONE-TO-QUARTZ §8 step 1), and what the
+-   > button says. Until that is confirmed, a chapter the app saved to a folder on
+-   > your Mac is not in the book: ask the technical contact to put it on
+-   > `drafts`, or follow what `docs/what-this-book-runs-on.md` records for your
+-   > copy of the book.
++2. **Send it to drafts.** On the screen showing the converted chapter, press
++   **Send to drafts**. The chapter and its pictures go into the book's drafts
++   area as one change, made by you. You need to be signed in (the book list
++   shows your book); if you aren't, the screen says so before you convert.
++
++   A **new** chapter also gets one line on the book's front page, under
++   **Contents**, in the same change, and you are shown the line before you send:
++
++       - **[[chapters/Chapter 5|Chapter 5: Photosynthesis]]**
++
++   Nothing else on the front page changes. You can add a sentence under the line
++   later, in the browser. Bringing the same Word file in again replaces the
++   chapter and leaves the front page alone.
++
++3. **Keep Word as your copy.** To change the chapter later, edit the Word file
++   and bring it in again under the same name. The app shows how many lines
++   differ and who last changed the chapter, and asks you to confirm the
++   replacement. A change someone else made on the website since then (an
++   accepted reader suggestion, say) is replaced too, so make the same change in
++   your Word file first.
+ 
+ 4. **Check it on the drafts preview, then go live.** Once the chapter is on
+    `drafts` it appears on the drafts preview within a few minutes. Read it there,
+diff --git a/scripts/seed-index.md b/scripts/seed-index.md
+index 5f9774a..57111c6 100644
+--- a/scripts/seed-index.md
++++ b/scripts/seed-index.md
+@@ -34,9 +34,10 @@ hides or shows them.
+ 
+ **Suggest an edit.** Found a typo, a broken reference, or a paragraph that does
+ not explain what it should? Every page carries a **Suggest an edit** button; no
+-account is needed. Every page also has an **Edit on GitHub** link that opens the
+-page's source, where anyone with a free GitHub account can propose a change. A
+-maintainer reviews everything before it reaches the book.
++account is needed. Every page also has **Edit this page**: change the whole
++page, or one paragraph with the pencil beside it, and propose it, signed in with
++GitHub or just with your name. The author reviews everything before it reaches
++the book.
+ 
+ ---
+ 
+-- 
+2.43.0
+

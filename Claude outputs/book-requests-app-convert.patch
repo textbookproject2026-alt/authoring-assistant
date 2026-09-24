@@ -1,0 +1,495 @@
+From 2ff0f511032197cd16b632e8dd6ad4fbeab91126 Mon Sep 17 00:00:00 2001
+From: Alec Gordon <alecg95@gmail.com>
+Date: Thu, 24 Sep 2026 21:02:40 +0200
+Subject: [PATCH] provision: bring the manuscript in with the Authoring
+ Assistant's own converter and front-page line; app-centred welcome email
+
+Chapters keep the Word file's name, as the app names them, so bringing the same
+chapter in again from the app replaces it. No front matter on chapters (the app
+adds none). pandoc from jgm/pandoc releases, pinned with PANDOC_VERSION.
+APP_DOWNLOAD_URL puts the app's download in the welcome email.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018UfPMbuFVLu4XgLaag8qvX
+---
+ .github/workflows/provision.yml | 13 +++++++-
+ README.md                       | 19 +++++++----
+ scripts/app_seed.py             | 59 +++++++++++++++++++++++++++++++++
+ scripts/lib.mjs                 | 48 ++++++---------------------
+ scripts/provision.mjs           | 38 ++++++++++++++++-----
+ scripts/seed.mjs                | 49 +++++++++++----------------
+ test/lib.test.mjs               | 18 +++-------
+ test/seed.test.mjs              | 27 +++++++++------
+ 8 files changed, 163 insertions(+), 108 deletions(-)
+ create mode 100644 scripts/app_seed.py
+
+diff --git a/.github/workflows/provision.yml b/.github/workflows/provision.yml
+index e4810e3..ef09ba7 100644
+--- a/.github/workflows/provision.yml
++++ b/.github/workflows/provision.yml
+@@ -34,8 +34,18 @@ jobs:
+       - uses: actions/setup-node@v6
+         with:
+           node-version: 22
++      # The same pandoc release the Authoring Assistant bundles, so a chapter set
++      # up here and the same chapter brought in again from the app match. Pin it
++      # with the PANDOC_VERSION variable, set to the app build's PANDOC_VERSION.
+       - name: pandoc, for Word manuscripts
+-        run: sudo apt-get update -qq && sudo apt-get install -y -qq pandoc
++        env:
++          GH_TOKEN: ${{ github.token }}
++          PANDOC_VERSION: ${{ vars.PANDOC_VERSION }}
++        run: |
++          set -euo pipefail
++          gh release download ${PANDOC_VERSION:+"$PANDOC_VERSION"} -R jgm/pandoc --pattern '*-amd64.deb' -D "$RUNNER_TEMP"
++          sudo dpkg -i "$RUNNER_TEMP"/pandoc-*-amd64.deb
++          pandoc --version | head -1
+       - name: Provision
+         env:
+           ISSUE_NUMBER: ${{ github.event.issue.number }}
+@@ -49,4 +59,5 @@ jobs:
+           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+           MAIL_FROM: ${{ vars.MAIL_FROM }}
+           MAIL_REPLY_TO: ${{ vars.MAIL_REPLY_TO }}
++          APP_DOWNLOAD_URL: ${{ vars.APP_DOWNLOAD_URL }}
+         run: node scripts/provision.mjs
+diff --git a/README.md b/README.md
+index 0adbd62..5491ede 100644
+--- a/README.md
++++ b/README.md
+@@ -58,11 +58,16 @@ it as each step finishes:
+ 1. **Content repo** `textbookproject2026-alt/<slug>`, public: the
+    textbook-template's files minus its machinery (`new-book.mjs`, `SETUP.md`),
+    `textbook.config.json`, the front page filled from `scripts/seed-index.md`
+-   (authors, topic, contents), each manuscript file as a chapter
+-   (`pandoc -t gfm --wrap=none`, images under `assets/<chapter>/`), a CC BY-SA
+-   `LICENSE`, and the managed files rendered by `configure.mjs`. Pushed to `main`
+-   and `drafts`, with `[skip ci]` so the book's workflows don't run before the
+-   registry knows it.
++   (authors, topic), a CC BY-SA `LICENSE`, and the managed files rendered by
++   `configure.mjs`. Each manuscript file becomes a chapter **the way the
++   Authoring Assistant brings one in**: `scripts/app_seed.py` runs the app's own
++   `convert.py` (from a checkout of `authoring-assistant`) and its own
++   `contents.py` for the front-page line. The chapter keeps the Word file's
++   name (`chapters/Chapter 3 – Reality.md`, pictures in
++   `assets/Chapter 3 – Reality/`), so when the author brings the same Word file
++   in again from the app, it replaces the chapter instead of adding a second
++   one. Pushed to `main` and `drafts`, with `[skip ci]` so the book's workflows
++   don't run before the registry knows it.
+ 2. **The GitHub App** `textbook-suggest-edit` gets the repo added to its
+    installation (suggest an edit, the in-site editor). The author is invited with
+    write access if they gave a GitHub login.
+@@ -102,7 +107,7 @@ Settings → Secrets and variables → Actions.
+ 
+ | Name | Kind | What |
+ |---|---|---|
+-| `PLATFORM_TOKEN` | secret | Classic PAT of **textbookproject2026-alt**, scopes `repo`, `workflow`, `delete_repo`. Creates and deletes book repos, pushes their workflows, adds repos to the App installation (a user-token-only endpoint), opens and merges registry PRs, starts `reconcile`. |
++| `PLATFORM_TOKEN` | secret | Classic PAT of **textbookproject2026-alt**, scopes `repo`, `workflow`, `delete_repo`. Reads the private `authoring-assistant` (for its converter), creates and deletes book repos, pushes their workflows, adds repos to the App installation (a user-token-only endpoint), opens and merges registry PRs, starts `reconcile`. |
+ | `CLOUDFLARE_API_TOKEN` | secret | Account → Cloudflare Pages → Edit; Zone → DNS → Edit, for `confused4now.org` only. |
+ | `CLOUDFLARE_ACCOUNT_ID` | secret | The account the books' Pages projects live in (the one quartz-book deploys to). |
+ | `CLOUDFLARE_ZONE_ID` | secret | `confused4now.org`'s zone ID. |
+@@ -111,6 +116,8 @@ Settings → Secrets and variables → Actions.
+ | `RESEND_API_KEY` | secret, optional | Email the author when their book is up. Without it you send the prepared email yourself. |
+ | `MAIL_FROM` | variable, optional | e.g. `Open textbooks <books@confused4now.org>` (a domain verified in Resend). |
+ | `MAIL_REPLY_TO` | variable, optional | Where the author's replies go. |
++| `APP_DOWNLOAD_URL` | variable, optional | A stable download address for the Authoring Assistant disk image, put in the welcome email. Without it the email says the app comes separately, and the final comment reminds you to send it. |
++| `PANDOC_VERSION` | variable, optional | The pandoc release provisioning installs, e.g. `3.8.2`. Set it to the app build's `PANDOC_VERSION` so both convert Word the same way. Unset means the latest release. |
+ | `APPROVERS` | variable, optional | A JSON list of logins, e.g. `["alec-gordon"]`, besides the repo owner, whose `approved` / `remove` labels count. |
+ 
+ The suggest-edit function needs the App installed on **this** repo (Issues and
+diff --git a/scripts/app_seed.py b/scripts/app_seed.py
+new file mode 100644
+index 0000000..67870e4
+--- /dev/null
++++ b/scripts/app_seed.py
+@@ -0,0 +1,59 @@
++"""The manuscript into a new book, the way the Authoring Assistant does it.
++
++    python3 scripts/app_seed.py <authoring-assistant checkout> <book folder> <file>...
++
++Word files go through the app's own converter (app/convert.py: the same
++pandoc flags, the Word file's own name for the chapter, pictures in
++assets/<chapter name>/), and each chapter gets its front-page line from the
++app's own contents.py. So a chapter set up here and the same chapter brought
++in again later from the app are the same file, and the app replaces it
++instead of adding a second copy. Markdown files are copied under their own
++name. Prints the chapters made, as JSON, in order.
++"""
++
++import json
++import os
++import shutil
++import sys
++
++aa, book, files = sys.argv[1], sys.argv[2], sys.argv[3:]
++sys.path.insert(0, os.path.abspath(aa))
++from app import contents, convert  # noqa: E402
++
++chapters_dir = os.path.join(book, "chapters")
++index_path = os.path.join(book, "index.md")
++made = []
++
++for path in files:
++    base = os.path.basename(path)
++    if base.lower().endswith(".docx"):
++        name = convert.suggest_name(path)
++        problem = convert.name_problem(name) or convert.destination_problem(chapters_dir, name)
++        if problem:
++            sys.exit(f"{base}: {problem}")
++        result = convert.convert(path, name, chapters_dir)
++        try:
++            convert.save(result, chapters_dir)
++        finally:
++            convert.discard(result)
++        text = result["text"]
++    else:
++        name = base if base.lower().endswith((".md", ".markdown")) else base + ".md"
++        problem = convert.name_problem(name) or convert.destination_problem(chapters_dir, name)
++        if problem:
++            sys.exit(f"{base}: {problem}")
++        shutil.copyfile(path, os.path.join(chapters_dir, name))
++        with open(os.path.join(chapters_dir, name), encoding="utf-8", errors="replace") as fh:
++            text = fh.read()
++
++    chapter_path = f"chapters/{name}"
++    title = contents.chapter_title(text, name)
++    with open(index_path, encoding="utf-8", newline="") as fh:
++        index = fh.read()
++    new, _why = contents.add_line(index, chapter_path, title)
++    if new is not None:
++        with open(index_path, "w", encoding="utf-8", newline="") as fh:
++            fh.write(new)
++    made.append({"path": chapter_path, "title": title})
++
++print(json.dumps(made))
+diff --git a/scripts/lib.mjs b/scripts/lib.mjs
+index 189c78d..7374876 100644
+--- a/scripts/lib.mjs
++++ b/scripts/lib.mjs
+@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
+ export const OWNER = process.env.PLATFORM_OWNER || "textbookproject2026-alt";
+ export const REGISTRY_REPO = `${OWNER}/textbook-registry`;
+ export const TEMPLATE_REPO = `${OWNER}/textbook-template`;
++export const APP_REPO = `${OWNER}/authoring-assistant`;
+ export const BUILDER_REPO = `${OWNER}/quartz-book`;
+ 
+ const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+@@ -154,40 +155,14 @@ export function removeBook(text, slug) {
+ 
+ const yamlStr = (s) => JSON.stringify(s);
+ 
+-/** A chapter file name from a manuscript file name: "Chapter 1 – Soils.docx" -> "chapter-1-soils". */
+-export function chapterSlug(fileName) {
+-  return (
+-    fileName
+-      .replace(/\.[^.]+$/, "")
+-      .toLowerCase()
+-      .normalize("NFKD")
+-      .replace(/\p{M}/gu, "")
+-      .replace(/[^a-z0-9]+/g, "-")
+-      .replace(/^-+|-+$/g, "")
+-      .slice(0, 60) || "chapter"
+-  );
+-}
+-
+-/** The first "# Heading" of a converted chapter, else the file name. */
+-export function chapterTitle(markdown, fileName) {
+-  const h = markdown.match(/^#\s+(.+?)\s*#*\s*$/m);
+-  const raw = h ? h[1] : fileName.replace(/\.[^.]+$/, "");
+-  return raw.replace(/\*\*|__|[*_`]/g, "").replace(/\s+/g, " ").trim() || "Untitled chapter";
+-}
+-
+-/** Frontmatter added to a chapter that has none; one that has some is left alone. */
+-export function withFrontmatter(markdown, { title, topic }) {
+-  if (/^---\n[\s\S]*?\n---\n/.test(markdown)) return markdown;
+-  const fm = [`title: ${yamlStr(title)}`, topic ? `topic: ${yamlStr(topic)}` : null].filter(Boolean).join("\n");
+-  return `---\n${fm}\n---\n\n${markdown.replace(/^\s+/, "")}`;
+-}
+-
+ /**
+- * index.md for a new book: the template's seed with its tokens filled, the
+- * scaffolding note removed, and (when there is a manuscript) the contents list
+- * pointing at the converted chapters and the example concept index gone.
++ * index.md for a new book: the template's seed with its tokens filled and the
++ * scaffolding note removed. With a manuscript, the template's example chapter
++ * and example concept go from the page, leaving "## Contents" empty for
++ * app_seed.py to fill, one line per chapter, with the Authoring Assistant's
++ * own contents.py (the line the app adds when a chapter is brought in later).
+  */
+-export function frontPage(seed, req, { domain, chapters }) {
++export function frontPage(seed, req, { domain, manuscript }) {
+   let t = seed
+     .replace("  - __MAINTAINER_YAML__", req.authors.map((a) => `  - ${yamlStr(a)}`).join("\n"))
+     .split("__TITLE__").join(req.title)
+@@ -198,12 +173,9 @@ export function frontPage(seed, req, { domain, chapters }) {
+   if (req.topic) t = t.replace(/^---\n/, `---\ntopic: ${yamlStr(req.topic)}\n`);
+   // The paragraph that says new-book.mjs filled this in: not true here, and not for readers.
+   t = t.replace(/\nThe book's front page\.[\s\S]*?\n\n/, "\n");
+-  if (chapters.length) {
+-    t = t.replace(
+-      /## Contents\n[\s\S]*?(?=\n## )/,
+-      `## Contents\n\n${chapters.map((c) => `- **[[chapters/${c.slug}|${c.title.replace(/[|\]]/g, "-")}]]**`).join("\n")}\n`,
+-    );
+-    t = t.replace(/## Concept index\n[\s\S]*?(?=\n## )/, "");
++  if (manuscript) {
++    t = t.replace(/## Contents\n[\s\S]*?(?=\n## )/, "## Contents\n");
++    t = t.replace(/\n## Concept index\n[\s\S]*?(?=\n## )/, "");
+   }
+   return t;
+ }
+diff --git a/scripts/provision.mjs b/scripts/provision.mjs
+index 644af3f..c479bb7 100644
+--- a/scripts/provision.mjs
++++ b/scripts/provision.mjs
+@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
+ import { join, resolve } from "node:path";
+ import { tmpdir } from "node:os";
+ import {
+-  BUILDER_REPO, OWNER, REGISTRY_REPO, TEMPLATE_REPO, addBook, answers, cfAccount, cfZone, cloneRegistry, cloudflare,
++  APP_REPO, BUILDER_REPO, OWNER, REGISTRY_REPO, TEMPLATE_REPO, addBook, answers, cfAccount, cfZone, cloneRegistry, cloudflare,
+   git, github, installationId, issues, label, parseRequest, registryEntry, registryPullRequest, sendEmail, sleep,
+   statusComment, today,
+ } from "./lib.mjs";
+@@ -149,6 +149,7 @@ async function main() {
+         `**Done.** https://${domain}`,
+         "",
+         emailed ? `The author was emailed at ${req.email}.` : mailto ? `The author hasn't been told yet: [open this email to send it](${mailto.slice(0, 7900)}).` : "No email address in the request: tell the author yourself.",
++        process.env.APP_DOWNLOAD_URL ? "" : "\n**Send the author the Authoring Assistant disk image** too: `APP_DOWNLOAD_URL` isn't set, so the message says it comes separately.",
+         "",
+         "<details><summary>The message</summary>",
+         "",
+@@ -170,8 +171,15 @@ function seedBook(req, domain) {
+   const dst = join(WORK, "book");
+   git(["clone", "--depth", "1", `https://github.com/${TEMPLATE_REPO}.git`, src]);
+   const templateSha = git(["rev-parse", "HEAD"], src);
++  // The manuscript is brought in with the Authoring Assistant's own code, so
++  // the author bringing a chapter in again from the app replaces it.
++  let appDir = null;
++  if (req.manuscript.length) {
++    appDir = join(WORK, "authoring-assistant");
++    git(["clone", "--depth", "1", `https://github.com/${APP_REPO}.git`, appDir]);
++  }
+   const chapters = buildBookTree({
+-    req, domain, templateDir: src, outDir: dst, manuscriptRoot: HERE,
++    req, domain, templateDir: src, appDir, outDir: dst, manuscriptRoot: HERE,
+     registryFile: join(WORK, "registry/registry.json"), entryFile: join(WORK, "entry.json"), today: today(),
+   });
+ 
+@@ -190,21 +198,33 @@ function seedBook(req, domain) {
+ }
+ 
+ function welcome(req, domain, repo) {
++  const app = process.env.APP_DOWNLOAD_URL;
++  const portal = domain.split(".").slice(1).join(".");
+   return `Hello ${req.authors[0]},
+ 
+ Your textbook "${req.title}" is now online:
+ 
+   https://${domain}
+ 
+-It is listed on https://${domain.split(".").slice(1).join(".")}, and its concept pages and tags join the key-word graph there as you add them.
++It is listed on https://${portal}.
++
++Everything you do on the book happens in one app, the Authoring Assistant.
++${app ? `Download it here: ${app}\n` : "It comes to you separately, as a disk image.\n"}
++Getting started takes about five minutes:
++
++1. Open the disk image, drag Authoring Assistant into Applications, and open it.
++   Your web browser opens; that is the app.
++2. Press "Sign in". You need a GitHub account${req.maintainer_github ? ` (yours is ${req.maintainer_github})` : ""}; the app shows you a short code to type into GitHub's page.
++3. Your book is waiting at the top of the list as an invitation. Press it to accept, and it is chosen.
++
++From then on, in the app:
+ 
+-How to work on it, with nothing to install:
++- "A Word document" brings a chapter in from Word. Read it, then press "Send to drafts". It is added to the book's front page too. To change a chapter later, edit it in Word and bring it in again.
++- "A chapter in the drafts area" links your citations and concept pages and builds the glossary.
++- "Waiting for you" lists suggestions and proposed changes from readers, to accept or decline.
++- "Going live" puts everything you have sent to drafts in front of readers. Until then you can check it at https://drafts.${req.project}.pages.dev
+ 
+-- Every page has an "Edit this page" link. Edit the whole page, or one paragraph with the pencil beside it, and propose the change. You can sign in with GitHub or just give your name and email.
+-- Proposed changes collect in the book's draft version, where you can read them before anything reaches readers: https://drafts.${req.project}.pages.dev
+-- Readers can comment in the margins and send suggestions; they reach you the same way.
+-${req.maintainer_github ? `- You have been invited to the book's source at https://github.com/${repo}. Accept the invitation from your GitHub notifications.\n` : ""}
+-Reply to this email with anything you need: more chapters converted from Word, a change of title, or help getting started.
++Reply to this email with anything you need.
+ `;
+ }
+ 
+diff --git a/scripts/seed.mjs b/scripts/seed.mjs
+index c0bd3c4..76e7141 100644
+--- a/scripts/seed.mjs
++++ b/scripts/seed.mjs
+@@ -1,52 +1,41 @@
+ // The files of a new book, laid out on disk: the template, minus its machinery,
+-// with the front page filled in, the manuscript converted into chapters, and the
+-// managed files rendered. No network and no git, so it can be tested
+-// (test/seed.test.mjs) against the real template and a real Word file.
++// with the front page filled in, the manuscript brought in the way the
++// Authoring Assistant brings a chapter in (app_seed.py runs the app's own
++// converter and front-page code), and the managed files rendered. No git and no
++// network, so it can be tested (test/seed.test.mjs) against the real template,
++// the real app and a real Word file.
+ 
+ import { execFileSync } from "node:child_process";
+-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { basename, join } from "node:path";
+-import { chapterSlug, chapterTitle, frontPage, registryEntry, withFrontmatter } from "./lib.mjs";
++import { frontPage, registryEntry } from "./lib.mjs";
+ 
+ // Template files a book made this way never runs.
+ const MACHINERY = ["scripts/new-book.mjs", "SETUP.md", "registry-entry.json", "REGISTRY-REQUEST.md"];
++const APP_SEED = join(import.meta.dirname, "app_seed.py");
+ 
+-export function buildBookTree({ req, domain, templateDir, outDir, manuscriptRoot, registryFile, entryFile, today }) {
++export function buildBookTree({ req, domain, templateDir, appDir, outDir, manuscriptRoot, registryFile, entryFile, today }) {
+   cpSync(templateDir, outDir, { recursive: true, filter: (p) => basename(p) !== ".git" });
+   for (const f of MACHINERY) rmSync(join(outDir, f), { force: true });
+   writeFileSync(join(outDir, "textbook.config.json"), `${JSON.stringify({ slug: req.slug }, null, 2)}\n`);
+ 
+-  // The manuscript: one chapter per file, in the order the files were sent. With
+-  // one, the template's example chapter and concept go; without, they stay as the
+-  // author's starting point.
++  // With a manuscript, the template's example chapter and concept go; without
++  // one, they stay as the author's starting point.
+   const files = req.manuscript.map((p) => join(manuscriptRoot, p)).filter((p) => existsSync(p));
+   if (files.length) {
+     rmSync(join(outDir, "chapters/chapter-01.md"), { force: true });
+     rmSync(join(outDir, "chapters/Definitions/Example concept.md"), { force: true });
+   }
+-  mkdirSync(join(outDir, "chapters"), { recursive: true });
+-  const chapters = [];
+-  for (const file of files) {
+-    const base = chapterSlug(basename(file));
+-    let slug = base;
+-    for (let n = 2; chapters.some((c) => c.slug === slug); n++) slug = `${base}-${n}`;
+-    const out = join(outDir, "chapters", `${slug}.md`);
+-    if (/\.docx$/i.test(file)) {
+-      // Run from chapters/, so image links come out relative to the chapter
+-      // (../assets/<slug>/media/…). --wrap=none is mandatory: a later rewrap
+-      // would rewrite every line and wreck git blame.
+-      execFileSync("pandoc", [file, "-f", "docx", "-t", "gfm", "--wrap=none", `--extract-media=../assets/${slug}`, "-o", `${slug}.md`], {
+-        cwd: join(outDir, "chapters"),
+-      });
+-    } else cpSync(file, out);
+-    const text = readFileSync(out, "utf8");
+-    const title = chapterTitle(text, basename(file));
+-    writeFileSync(out, withFrontmatter(text, { title, topic: req.topic }));
+-    chapters.push({ slug, title });
++  const seed = readFileSync(join(templateDir, "scripts/seed-index.md"), "utf8");
++  writeFileSync(join(outDir, "index.md"), frontPage(seed, req, { domain, manuscript: files.length > 0 }));
++
++  let chapters = [];
++  if (files.length) {
++    if (!appDir || !existsSync(join(appDir, "app", "convert.py")))
++      throw new Error("the Authoring Assistant checkout isn't there, so the manuscript can't be converted the way the app converts it.");
++    chapters = JSON.parse(execFileSync("python3", [APP_SEED, appDir, outDir, ...files], { encoding: "utf8" }));
+   }
+ 
+-  const seed = readFileSync(join(templateDir, "scripts/seed-index.md"), "utf8");
+-  writeFileSync(join(outDir, "index.md"), frontPage(seed, req, { domain, chapters }));
+   if (!existsSync(join(outDir, "LICENSE"))) {
+     const cc = req.licence === "CC-BY-SA-4.0";
+     writeFileSync(
+diff --git a/test/lib.test.mjs b/test/lib.test.mjs
+index d18dcdd..ffd57ae 100644
+--- a/test/lib.test.mjs
++++ b/test/lib.test.mjs
+@@ -1,7 +1,7 @@
+ import test from "node:test";
+ import assert from "node:assert/strict";
+ import { readFileSync } from "node:fs";
+-import { addBook, bookSpans, chapterSlug, chapterTitle, frontPage, parseRequest, registryEntry, removeBook, withFrontmatter } from "../scripts/lib.mjs";
++import { addBook, bookSpans, frontPage, parseRequest, registryEntry, removeBook } from "../scripts/lib.mjs";
+ 
+ const REGISTRY = readFileSync(new URL("./fixtures/registry.json", import.meta.url), "utf8");
+ const SEED = readFileSync(new URL("./fixtures/seed-index.md", import.meta.url), "utf8");
+@@ -50,22 +50,14 @@ test("removing the first book keeps the file valid", () => {
+   assert.equal(JSON.parse(out).books.length, JSON.parse(REGISTRY).books.length - 1);
+ });
+ 
+-test("chapters: names, titles, frontmatter", () => {
+-  assert.equal(chapterSlug("Chapter 1 – Économie des sols.docx"), "chapter-1-economie-des-sols");
+-  assert.equal(chapterTitle("intro\n\n# **Reality** and the Problem\n\ntext", "x.docx"), "Reality and the Problem");
+-  assert.equal(chapterTitle("no heading", "Chapter 2.docx"), "Chapter 2");
+-  assert.equal(withFrontmatter("# T\n", { title: "T", topic: "Ecology" }), '---\ntitle: "T"\ntopic: "Ecology"\n---\n\n# T\n');
+-  assert.equal(withFrontmatter("---\na: 1\n---\n# T\n", { title: "T" }), "---\na: 1\n---\n# T\n");
+-});
+-
+-test("the front page: tokens filled, scaffolding gone, contents from the manuscript", () => {
++test("the front page: tokens filled, scaffolding gone, Contents emptied for the manuscript", () => {
+   const req = parseRequest(block(REQ));
+-  const page = frontPage(SEED, req, { domain: "soil-ecology.confused4now.org", chapters: [{ slug: "chapter-1", title: "Soils | intro" }] });
++  const page = frontPage(SEED, req, { domain: "soil-ecology.confused4now.org", manuscript: true });
+   assert.doesNotMatch(page, /__[A-Z_]+__/);
+   assert.match(page, /^---\ntopic: "Ecology"\nauthors:\n  - "Ada Lovelace"\n  - "Mary Somerville"\n---/);
+-  assert.match(page, /\[\[chapters\/chapter-1\|Soils - intro\]\]/);
++  assert.match(page, /## Contents\n\n## How to read/);
+   assert.doesNotMatch(page, /Example concept|new-book\.mjs|chapter-01/);
+-  const blank = frontPage(SEED, req, { domain: "x.confused4now.org", chapters: [] });
++  const blank = frontPage(SEED, req, { domain: "x.confused4now.org", manuscript: false });
+   assert.match(blank, /chapter-01/);
+   assert.doesNotMatch(blank, /new-book\.mjs/);
+ });
+diff --git a/test/seed.test.mjs b/test/seed.test.mjs
+index be6f7b4..4a41fb9 100644
+--- a/test/seed.test.mjs
++++ b/test/seed.test.mjs
+@@ -12,8 +12,11 @@ import { buildBookTree } from "../scripts/seed.mjs";
+ import { parseRequest } from "../scripts/lib.mjs";
+ 
+ const TEMPLATE = process.env.TEMPLATE_DIR || fileURLToPath(new URL("../../textbook-template", import.meta.url));
++const APP = process.env.APP_DIR || fileURLToPath(new URL("../../authoring-assistant", import.meta.url));
+ const hasPandoc = (() => { try { execFileSync("pandoc", ["--version"]); return true; } catch { return false; } })();
+-const skip = !existsSync(join(TEMPLATE, "configure.mjs")) ? "no textbook-template checkout" : !hasPandoc ? "no pandoc" : false;
++const skip = !existsSync(join(TEMPLATE, "configure.mjs")) ? "no textbook-template checkout"
++  : !existsSync(join(APP, "app", "convert.py")) ? "no authoring-assistant checkout (APP_DIR)"
++  : !hasPandoc ? "no pandoc" : false;
+ 
+ const req = (manuscript) =>
+   parseRequest("```json\n" + JSON.stringify({
+@@ -28,28 +31,30 @@ function build(manuscript) {
+   cpSync(fileURLToPath(new URL("./fixtures/Chapter 1 – Soils.docx", import.meta.url)), join(root, "requests/r1/Chapter 1 – Soils.docx"));
+   const out = join(work, "book");
+   const chapters = buildBookTree({
+-    req: req(manuscript), domain: "soil-ecology.confused4now.org", templateDir: TEMPLATE, outDir: out, manuscriptRoot: root,
++    req: req(manuscript), domain: "soil-ecology.confused4now.org", templateDir: TEMPLATE, appDir: APP, outDir: out, manuscriptRoot: root,
+     registryFile: fileURLToPath(new URL("./fixtures/registry.json", import.meta.url)), entryFile: join(work, "entry.json"), today: "2026-09-24",
+   });
+   return { out, chapters };
+ }
+ 
+-test("a Word manuscript becomes a chapter with its image, in the builder layout", { skip }, () => {
++test("a Word manuscript becomes a chapter exactly as the Authoring Assistant would bring it in", { skip }, () => {
+   const { out, chapters } = build(["requests/r1/Chapter 1 – Soils.docx"]);
+-  assert.deepEqual(chapters, [{ slug: "chapter-1-soils", title: "Soils and Their Life" }]);
+-  const ch = readFileSync(join(out, "chapters/chapter-1-soils.md"), "utf8");
+-  assert.match(ch, /^---\ntitle: "Soils and Their Life"\ntopic: "Ecology"\n---\n/);
+-  assert.match(ch, /A first paragraph with a long line that must not be wrapped by pandoc because wrapping would destroy blame/); // --wrap=none
+-  const img = ch.match(/\.\.\/assets\/chapter-1-soils\/media\/[^\s)"]+/)[0];
+-  assert.ok(existsSync(join(out, "chapters", img)), `${img} exists`);
++  // The Word file's own name, as the app's "A Word document" suggests it.
++  assert.deepEqual(chapters, [{ path: "chapters/Chapter 1 – Soils.md", title: "Soils and Their Life" }]);
++  const ch = readFileSync(join(out, "chapters/Chapter 1 – Soils.md"), "utf8");
++  assert.match(ch, /^# Soils and \*Their\* Life/); // no front matter: the app adds none
++  assert.match(ch, /A first paragraph with a long line that must not be wrapped by pandoc because wrapping would destroy blame/);
++  const link = decodeURIComponent(ch.match(/(?:\]\(|src=")(\.\.\/assets\/[^)"]+)/)[1]);
++  assert.match(link, /^\.\.\/assets\/Chapter 1 – Soils\//);
++  assert.ok(existsSync(join(out, "chapters", link)), `${link} exists`);
+   assert.ok(!existsSync(join(out, "chapters/chapter-01.md")));
+   assert.ok(!existsSync(join(out, "scripts/new-book.mjs")));
+   assert.ok(!existsSync(join(out, "SETUP.md")));
+   assert.equal(JSON.parse(readFileSync(join(out, "textbook.config.json"), "utf8")).slug, "soil-ecology");
++  // The front-page line is the app's own (contents.py).
+   const index = readFileSync(join(out, "index.md"), "utf8");
+-  assert.match(index, /\[\[chapters\/chapter-1-soils\|Soils and Their Life\]\]/);
++  assert.match(index, /## Contents\n\n- \*\*\[\[chapters\/Chapter 1 – Soils\|Soils and Their Life\]\]\*\*\n\n## How to read/);
+   assert.match(readFileSync(join(out, "LICENSE"), "utf8"), /CC BY-SA 4\.0/);
+-  // configure.mjs rendered the managed files for this book.
+   assert.match(readFileSync(join(out, "README.md"), "utf8"), /Soil Ecology/);
+   assert.match(readFileSync(join(out, "admin/config.yml"), "utf8"), /textbookproject2026-alt\/soil-ecology/);
+ });
+-- 
+2.43.0
+

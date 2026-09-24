@@ -40,7 +40,11 @@ TOKEN_URL = "https://github.com/login/oauth/access_token"
 # Every registered repository is public, so this is the narrowest scope that still allows
 # closing a suggestion, leaving a reply, and accepting a draft change. It
 # deliberately gives no access to any private work the author may have.
-SCOPE = "public_repo"
+# repo:invite lets the author accept the invitation to their own book here, in
+# the book list, instead of on GitHub's website (book-requests invites the
+# author when it sets a book up). It can accept or decline invitations and
+# nothing else.
+SCOPE = "public_repo repo:invite"
 
 USER_AGENT = "Authoring-Assistant"
 TIMEOUT = 30
@@ -241,6 +245,22 @@ def whoami(token):
         "login": result.get("login", ""),
         "name": result.get("name") or result.get("login", ""),
     }
+
+
+def invitations(token):
+    """Invitations waiting for the signed-in author, as the service lists them,
+    or a Problem. A sign-in from before repo:invite was asked for gets a 403."""
+    result = _request("GET", f"{API}/user/repository_invitations?per_page=100",
+                      token=token)
+    if isinstance(result, Problem):
+        return result
+    return [i for i in result if isinstance(i, dict)] if isinstance(result, list) else []
+
+
+def accept_invitation(token, invitation_id):
+    """Accept one invitation. {} on success, or a Problem."""
+    return _request("PATCH", f"{API}/user/repository_invitations/{int(invitation_id)}",
+                    token=token)
 
 
 def repo_access(token, book):

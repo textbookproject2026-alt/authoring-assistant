@@ -384,10 +384,15 @@ work again (`drafts.send`, `MOVED*`).
 
 ### The scope, and why it is narrow
 
-`app/github.py` requests **`public_repo`**, not `repo`. The textbook repo is
-public, and `public_repo` still allows closing a suggestion, replying, and
-accepting a draft change — while giving no access whatsoever to any private
-repository the author owns. Do not widen this without a reason.
+`app/github.py` requests **`public_repo repo:invite`**, not `repo`. The
+textbook repo is public, and `public_repo` still allows closing a suggestion,
+replying, and accepting a draft change — while giving no access whatsoever to
+any private repository the author owns. `repo:invite` was added (Sep 2026) so an
+author set up by book-requests accepts the invitation to their book in the
+book list instead of on GitHub's website; it can accept or decline invitations
+and nothing else, and the app only ever lists and accepts invitations to books
+in the registry. A sign-in from before it was added keeps working and is told to
+sign in again to see invitations. Do not widen this further without a reason.
 
 ### Revoking
 

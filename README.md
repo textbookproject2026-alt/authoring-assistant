@@ -88,6 +88,12 @@ anyone else's work.
 If your account can't make changes to the book, the tool says so before you
 start, not at the end.
 
+**An invitation to your book.** When a book is set up for you, you are
+invited to it. After you sign in, the invitation shows at the top of the list
+of books: press it to accept, and the book is chosen straight away. Nothing
+needs doing on GitHub's website. Only invitations to textbooks on the platform
+are shown.
+
 **Download a copy** (under the choices) puts every file of the book, as the
 drafts area holds them, into a new folder on this Mac. It never writes over a
 folder that is already there.
@@ -149,6 +155,14 @@ Your Word document is never changed and never moved. It stays exactly where it
 is, and you can go back to it at any time.
 
 ### Sending it to the drafts area
+
+A **new** chapter also gets one line on the book's front page, under
+“Contents”, in the same change, so readers can find it there:
+`- **[[chapters/Chapter 7|Chapter 7: Its title]]**`. You see the line before
+you send, and nothing else on the front page changes. Bringing in a chapter
+that is already there leaves the front page alone. With no “Contents” heading
+on the front page, nothing is added and you are told.
+
 
 If you are signed in to the console and can make changes to the book, the
 converted chapter can also go straight to the book's **drafts area**, the same

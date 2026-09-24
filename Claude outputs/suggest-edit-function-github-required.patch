@@ -1,0 +1,96 @@
+From d35f90e76d4fc4449a581766645b1c796f185572 Mon Sep 17 00:00:00 2001
+From: Alec Gordon <alecg95@gmail.com>
+Date: Thu, 24 Sep 2026 21:03:04 +0200
+Subject: [PATCH] request-book: a GitHub username is required
+
+The author works on their book in the Authoring Assistant, which signs in with
+GitHub, and provisioning invites that account to the book.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018UfPMbuFVLu4XgLaag8qvX
+---
+ README.md                  | 4 +++-
+ api/request-book.js        | 9 ++++++---
+ test/request-book.test.mjs | 3 +++
+ 3 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/README.md b/README.md
+index b75164c..f5c1fb3 100644
+--- a/README.md
++++ b/README.md
+@@ -127,7 +127,9 @@ GitHub-style editor on the book's own page. This is its back end.
+ 
+ ## Book requests (`/api/request-book`)
+ 
+-The portal's *Publish your textbook here* form. Accepted only from the portal
++The portal's *Publish your textbook here* form. A GitHub username is required:
++the author works on the book in the Authoring Assistant, which signs in with
++GitHub, and provisioning invites that account to the book. Accepted only from the portal
+ (`https://<platform.portal.domain>`, and `<portal project>.pages.dev` with its
+ previews). It commits any manuscript files (.docx/.md, at most 5, 3 MB in total)
+ to `requests/<reference>/` on the **private** requests repo and files an issue
+diff --git a/api/request-book.js b/api/request-book.js
+index 8b22356..d838457 100644
+--- a/api/request-book.js
++++ b/api/request-book.js
+@@ -12,7 +12,7 @@
+  * unpublished manuscript, and the registry and book repos are public.
+  *
+  * Contract:
+- *   POST JSON { title, authors, email, summary, topic?, github?, manuscriptLink?,
++ *   POST JSON { title, authors, email, summary, topic?, github, manuscriptLink?,
+  *               notes?, agreeLicence, website, files?: [{ name, data }] }
+  *     files[].data is base64. At most 5 files, .docx or .md, 3 MB decoded in total.
+  *     -> 201 { reference }
+@@ -145,7 +145,10 @@ export function validate(body) {
+   if (summary.length < MIN_SUMMARY) return reject('summary', 'Please describe the book in a sentence or two.');
+   if (summary.length > LIMITS.summary) return reject('summary too long', `Please keep the description under ${LIMITS.summary} characters.`);
+   if (topic.length > LIMITS.topic) return reject('topic too long', 'The subject area is too long.');
+-  if (github && !LOGIN_RE.test(github)) return reject('github', "That doesn't look like a GitHub username. Leave it blank if you don't have one.");
++  // Required: the author works on their book in the Authoring Assistant, which
++  // signs in with GitHub, and provisioning invites this account to the book.
++  if (!github) return reject('github missing', 'Please give your GitHub username. An account is free, at github.com/signup.');
++  if (!LOGIN_RE.test(github)) return reject('github', "That doesn't look like a GitHub username.");
+   if (link) {
+     let u;
+     try { u = new URL(link); } catch { u = null; }
+@@ -223,7 +226,7 @@ export function buildIssueBody(reference, d, { slug, committed, fileError }) {
+     `> ${inlineCode(d.summary)}`,
+     '',
+     `- **Email:** ${inlineCode(d.email)}`,
+-    `- **GitHub:** ${d.github ? inlineCode(d.github) : 'none given'}`,
++    `- **GitHub:** ${inlineCode(d.github)}`,
+     `- **Subject:** ${d.topic ? inlineCode(d.topic) : 'not given'}`,
+     `- **Proposed address:** \`${slug}.${REGISTRY.platform?.portal?.book_parent ?? 'confused4now.org'}\``,
+     '',
+diff --git a/test/request-book.test.mjs b/test/request-book.test.mjs
+index 4505777..95e4e01 100644
+--- a/test/request-book.test.mjs
++++ b/test/request-book.test.mjs
+@@ -56,6 +56,7 @@ const VALID = {
+   email: 'ada@example.com',
+   summary: 'An open textbook on soil ecology for first-year students.',
+   topic: 'Ecology',
++  github: 'ada-l',
+   agreeLicence: true,
+   files: [{ name: 'Chapter 1.docx', data: DOCX }],
+ };
+@@ -80,6 +81,7 @@ test('a valid request commits the files and files a private issue', async () =>
+   assert.equal(block.slug, 'soil-ecology-an-introduction');
+   assert.deepEqual(block.authors, ['Ada Lovelace', 'Mary Somerville']);
+   assert.equal(block.email, 'ada@example.com');
++  assert.equal(block.maintainer_github, 'ada-l');
+   assert.equal(block.status, 'live');
+   assert.equal(block.sandbox, false);
+   assert.deepEqual(block.manuscript, [`requests/${r.payload.reference}/Chapter 1.docx`]);
+@@ -106,6 +108,7 @@ test('validation', async () => {
+   await bad({ email: 'nope' }, /email/);
+   await bad({ summary: 'short' }, /describe/);
+   await bad({ github: 'not a login!' }, /GitHub username/);
++  await bad({ github: '' }, /github\.com\/signup/);
+   await bad({ manuscriptLink: 'http://x.example/a' }, /https/);
+   await bad({ files: [{ name: 'a.pdf', data: DOCX }] }, /\.docx/);
+   await bad({ files: [{ name: 'a.docx', data: Buffer.from('hello').toString('base64') }] }, /Word document/);
+-- 
+2.43.0
+

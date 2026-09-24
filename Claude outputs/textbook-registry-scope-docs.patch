@@ -1,0 +1,55 @@
+From 3e01c75efcffe0f01b2972d7a80741d6ad5cf886 Mon Sep 17 00:00:00 2001
+From: Alec Gordon <alecg95@gmail.com>
+Date: Thu, 24 Sep 2026 21:04:07 +0200
+Subject: [PATCH] docs: the Authoring Assistant's sign-in scope gains
+ repo:invite
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018UfPMbuFVLu4XgLaag8qvX
+---
+ docs/AUTHORING-APP-OPERATIONS.md | 12 ++++++++----
+ docs/INFRASTRUCTURE.md           |  5 +++--
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/docs/AUTHORING-APP-OPERATIONS.md b/docs/AUTHORING-APP-OPERATIONS.md
+index 8132893..53b253f 100644
+--- a/docs/AUTHORING-APP-OPERATIONS.md
++++ b/docs/AUTHORING-APP-OPERATIONS.md
+@@ -89,10 +89,14 @@ no client secret, no callback in use, no relay.
+ - **"Enable Device Flow" must be ticked** on the OAuth App, or every author's
+   sign-in fails with `incorrect_client_credentials`, shown to them as "The
+   sign-in identifier in Settings is not recognised."
+-- **Scope: `public_repo`.** It's enough to reply to and close suggestions, merge
+-  draft changes into `drafts` and open the publish PR, and it gives no access to
+-  private repositories. **This is why every content repo must be public**, and
+-  the registry's CI enforces it. Don't widen the scope.
++- **Scope: `public_repo repo:invite`.** `public_repo` is enough to reply to and
++  close suggestions, merge draft changes into `drafts` and open the publish PR,
++  and it gives no access to private repositories. **This is why every content
++  repo must be public**, and the registry's CI enforces it. `repo:invite` (Sep
++  2026) lets an author set up by book-requests accept the invitation to their
++  book in the app's book list; it can only accept or decline invitations, and
++  the app only lists invitations to registered books. A sign-in from before it
++  was added is told to sign in again. Don't widen the scope further.
+ - **It's one app for every book.** Revoking it signs out every author on every
+   book. Each author can revoke their own grant at
+   <https://github.com/settings/applications>.
+diff --git a/docs/INFRASTRUCTURE.md b/docs/INFRASTRUCTURE.md
+index fcef0ba..392e742 100644
+--- a/docs/INFRASTRUCTURE.md
++++ b/docs/INFRASTRUCTURE.md
+@@ -359,8 +359,9 @@ book that wants the editor brings its own Pages project and asks for one
+ - **Sign-in:** OAuth device flow against the *Textbook Author Console* OAuth App.
+   Its client ID is public by design, and comes from
+   `platform.console_oauth_client_id` in the registry. A value pasted into
+-  Settings overrides it. The scope is `public_repo`, which is why every content
+-  repo must be public.
++  Settings overrides it. The scope is `public_repo repo:invite`: `public_repo`
++  is why every content repo must be public, and `repo:invite` lets an author
++  accept the invitation to their book inside the app.
+ - **Signing:** a Developer ID Application certificate on the build machine, and
+   a `notarytool` keychain profile read through `NOTARY_PROFILE`. **Confirm at
+   handover** which Apple account holds them.
+-- 
+2.43.0
+

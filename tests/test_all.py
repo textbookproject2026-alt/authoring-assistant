@@ -1192,7 +1192,7 @@ check("nothing waiting to go live means no pull request is opened",
 
 
 check("the scope asked for excludes the author's private work",
-      _github.SCOPE == "public_repo", _github.SCOPE)
+      _github.SCOPE.split() == ["public_repo", "repo:invite"], _github.SCOPE)
 check("all four weekly jobs are known to the console",
       len(_github.WEEKLY_JOBS) == 4, len(_github.WEEKLY_JOBS))
 
@@ -1428,6 +1428,64 @@ check("choosing a book makes it the one on screen",
       _ws["book"]["slug"] == "book-a" and _ws["book"]["access"] == "write", _ws)
 check("the choice is remembered for next time",
       _config.read_state().get("last_book") == "book-a")
+
+# Invitations: the author accepts the one to their book in the book list.
+class _Invites(_Books):
+    def __init__(self, perms, listing, **kw):
+        super().__init__(dict(perms), **kw)
+        self.listing = listing
+
+    def request(self, method, url, token=None, payload=None, accept=None):
+        if url.startswith(f"{_github.API}/user/repository_invitations"):
+            self.calls.append((method, url, payload))
+            if isinstance(self.listing, _github.Problem):
+                return self.listing
+            if method == "PATCH":
+                ident = int(url.rsplit("/", 1)[1])
+                inv = next(i for i in self.listing if i["id"] == ident)
+                self.perms[inv["repository"]["full_name"]] = "write"
+                self.listing = [i for i in self.listing if i["id"] != ident]
+                return {}
+            return list(self.listing)
+        return super().request(method, url, token, payload, accept)
+
+
+_LISTING = [
+    {"id": 11, "repository": {"full_name": "example-org/book-b"},
+     "inviter": {"login": "platform"}},
+    {"id": 12, "repository": {"full_name": "stranger/not-a-book"},
+     "inviter": {"login": "someone"}},
+]
+_inv = _Invites(_PERMS, _LISTING)
+_server.CONSOLE.update(access={})
+_bk = _with_service(_inv, lambda: _server.r_books(None, {}))
+check("an invitation to a registered book is offered in the book list",
+      [(i["slug"], i["invitation"], i["inviter"]) for i in _bk["invitations"]]
+      == [("book-b", 11, "platform")], _bk["invitations"])
+check("an invitation to anything else is never shown",
+      all(i["invitation"] != 12 for i in _bk["invitations"]))
+check("the invited book isn't counted among the books left out",
+      _bk["hidden"] == 1, _bk["hidden"])
+check("an invitation this app didn't list can't be accepted through it",
+      "isn't one this app listed" in (_refused(lambda: _with_service(
+          _inv, lambda: _server.r_books_accept(None, {"invitation": 12}))) or "")
+      and not any(c[0] == "PATCH" for c in _inv.calls))
+_acc = _with_service(_inv, lambda: _server.r_books_accept(None, {"invitation": 11}))
+check("accepting makes the book the author's to change, straight away",
+      _acc["slug"] == "book-b" and _acc["access"] == "write"
+      and [c[1] for c in _inv.calls if c[0] == "PATCH"]
+      == [f"{_github.API}/user/repository_invitations/11"], _acc)
+_bk = _with_service(_inv, lambda: _server.r_books(None, {}))
+check("and it is then an ordinary book in the list, with no invitation left",
+      "book-b" in [b["slug"] for b in _bk["books"]] and not _bk["invitations"], _bk)
+_server.CONSOLE.update(access={})
+_old = _Invites(_PERMS, _github.Problem("no scope", code=403))
+_bk = _with_service(_old, lambda: _server.r_books(None, {}))
+check("a sign-in from before invitations is told how to see them, and nothing breaks",
+      "sign in again" in _bk["invite_note"] and not _bk["invitations"]
+      and [b["slug"] for b in _bk["books"]] == ["book-a"], _bk)
+_server.CONSOLE.update(access={})
+_with_service(_Books(_PERMS), lambda: _server.r_books(None, {}))
 
 _access_err = _with_service(
     _Books({"example-org/book-a": 500}),
@@ -2182,6 +2240,74 @@ check("and the same chapter can still be saved into the vault (Publish reads it)
 _again = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
 check("sending the same import again finds nothing to send",
       _again["nothing_to_send"] and _again["exists"], _again)
+
+# --- a new chapter's line on the front page (contents.py) ---------------------
+
+from app import contents as _contents
+
+_SEED = ("---\nauthors:\n  - \"A\"\n---\n\n# Book\n\n## Contents\n\n"
+         "- **[[chapters/chapter-01|Chapter 1 — One]]**\n  What it does.\n\n"
+         "## Concept index\n\n- [[Example concept]]\n")
+_new, _why = _contents.add_line(_SEED, "chapters/Chapter 7.md", "Chapter 7: Seven")
+check("a new chapter's line goes after the last item under Contents",
+      _new == _SEED.replace("  What it does.\n",
+                            "  What it does.\n- **[[chapters/Chapter 7|Chapter 7: Seven]]**\n"),
+      repr(_new))
+_old_lines = _SEED.splitlines(keepends=True)
+_new_lines = _new.splitlines(keepends=True)
+check("and it is the only line that changes",
+      len(_new_lines) == len(_old_lines) + 1
+      and [l for l in _new_lines if l not in _old_lines]
+      == ["- **[[chapters/Chapter 7|Chapter 7: Seven]]**\n"])
+check("line endings are kept",
+      _contents.add_line(_SEED.replace("\n", "\r\n"), "chapters/X.md", "X")[0]
+      == _new.replace("Chapter 7|Chapter 7: Seven", "X|X").replace("\n", "\r\n")
+      .replace("chapters/Chapter 7", "chapters/X"))
+check("a chapter already listed is not listed twice",
+      _contents.add_line(_new, "chapters/Chapter 7.md", "Seven")[0] is None)
+check("no Contents heading: nothing is added, and the author is told",
+      _contents.add_line("# Book\n\nText.\n", "chapters/X.md", "X")[0] is None
+      and "no “Contents” heading" in _contents.add_line("# B\n", "chapters/X.md", "X")[1])
+check("an empty Contents list gets the line under its heading",
+      _contents.add_line("## Contents\n\n## Next\n", "chapters/X.md", "X")[0]
+      == "## Contents\n\n- **[[chapters/X|X]]**\n\n## Next\n")
+check("a | in the title can't break the link",
+      _contents.line_for("chapters/X.md", "A | B") == "- **[[chapters/X|A - B]]**")
+check("the title is the chapter's first heading, else its file name",
+      _contents.chapter_title("Intro\n# **Chapter 3**: Reality\n", "c.md")
+      == "Chapter 3: Reality"
+      and _contents.chapter_title("No heading.", "Chapter 9.md") == "Chapter 9")
+
+_repo_ix = _GitRepo("example-org/book-a", dict(_DRAFTS_START, **{"index.md": _SEED}))
+_res = _converted(_wch, _wa, "Chapter 9.md", {})
+_look = _with_service(_repo_ix, lambda: _server.r_import_drafts_check(None, dict(_A)))
+check("a new chapter's check shows the front-page line it will add",
+      (_look.get("contents") or {}).get("line")
+      == "- **[[chapters/Chapter 9|Chapter 9]]**", _look.get("contents"))
+_sent = _with_service(_repo_ix, lambda: _server.r_import_drafts_send(
+    None, dict(_A, head=_look["head"])))
+_after = _repo_ix.files()
+check("and sends the chapter and that one line in the same commit",
+      _sent["sent"] and _sent["contents"]
+      and _after["index.md"].decode() == _SEED.replace(
+          "  What it does.\n",
+          "  What it does.\n- **[[chapters/Chapter 9|Chapter 9]]**\n")
+      and "chapters/Chapter 9.md" in _after, _after.get("index.md"))
+_res = _converted(_wch, _wa, "Chapter 9.md", {})
+_res["text"] = "# Chapter 9\n\nRevised in Word.\n"
+_before_ix = _repo_ix.files()["index.md"]
+_look = _with_service(_repo_ix, lambda: _server.r_import_drafts_check(None, dict(_A)))
+check("bringing the same chapter in again leaves the front page alone",
+      _look["exists"] and not _look.get("contents"), _look.get("contents"))
+_with_service(_repo_ix, lambda: _server.r_import_drafts_send(
+    None, dict(_A, head=_look["head"], replace=True)))
+check("and the front page is byte-identical after the replacement",
+      _repo_ix.files()["index.md"] == _before_ix)
+_res = _converted(_wch, _wa, "Chapter 10.md", {})
+_look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
+check("a book with no front page on drafts: the chapter still goes, with a note",
+      (_look.get("contents") or {}).get("note") and not _look["refused"]
+      and not _look["nothing_to_send"], _look.get("contents"))
 
 # The same, from a real Word document, when this machine has pandoc.
 if _pandoc:

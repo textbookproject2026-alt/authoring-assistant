@@ -69,6 +69,18 @@ def repo_paths(root, folder, md_name):
     return tuple(out)
 
 
+def index_path(root, folder):
+    """Where the book's front page sits in the repository: index.md at the top
+    of the vault the chapter is going into. None when that is outside `root`."""
+    vault = convert.find_vault_root(folder)
+    if vault is None:
+        return None
+    rel = os.path.relpath(os.path.join(vault, "index.md"), os.path.abspath(root))
+    if rel.startswith("..") or os.path.isabs(rel):
+        return None
+    return rel.replace(os.sep, "/")
+
+
 def pictures(result):
     """{path inside the pictures folder: bytes} for what the import pulled out."""
     base = os.path.join(result["stage"], convert.STAGE_MEDIA)
@@ -229,11 +241,12 @@ def edit_entries(snap, changed):
     return entries
 
 
-def read(token, book, chapter_path, media_dir):
+def read(token, book, chapter_path, media_dir, index=None):
     """What drafts holds now where this chapter is going.
 
     Returns a state dict, or a Problem. `refused` is set, in the author's
-    words, when the chapter must not be sent there at all.
+    words, when the chapter must not be sent there at all. With `index` (the
+    front page's path), `index_sha` is its blob in this same listing, or None.
     """
     listing = _listing(token, book)
     if isinstance(listing, github.Problem):
@@ -241,7 +254,11 @@ def read(token, book, chapter_path, media_dir):
     head, tree_sha, files = listing
 
     state = {"head": head, "tree": tree_sha, "on_drafts": {},
-             "exists": False, "last": None, "old_text": None, "refused": None}
+             "exists": False, "last": None, "old_text": None, "refused": None,
+             "index_sha": None}
+    front = files.get(index) if index else None
+    if front is not None and front.get("type") == "blob":
+        state["index_sha"] = front.get("sha")
     chapter = files.get(chapter_path)
     if chapter is not None and chapter.get("type") != "blob":
         state["refused"] = (

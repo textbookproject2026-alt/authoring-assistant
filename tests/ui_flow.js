@@ -119,8 +119,9 @@ const DRAFTS_LOOK = {
   chapter_path: 'chapters/Chapter 6.md', media_dir: 'assets/Chapter 6',
   refused: null, exists: false, last: null, nothing_to_send: false,
   removed: [], changed_lines: null,
+  contents: { line: '- **[[chapters/Chapter 6|Chapter 6]]**', path: 'index.md' },
 };
-const DRAFTS_MOVED = Object.assign({}, DRAFTS_LOOK, {
+const DRAFTS_MOVED = Object.assign({}, DRAFTS_LOOK, { contents: null,
   head: 'h2', exists: true, removed: ['image2.png'],
   changed_lines: { removed: 3, added: 4 },
   last: { who: 'cms-user', when: '2026-09-22T10:00:00Z', message: 'Update Chapter 6' },
@@ -212,7 +213,12 @@ const fetch = async (route, opts) => {
 
     '/api/workspace': CURRENT_WS,
     '/api/books': { books: [BOOK_A], hidden: 2, offline: false, note: '',
-                    workspace: CURRENT_WS },
+                    invitations: [{ slug: 'book-b', title: 'Book B',
+                                    repo: 'example-org/book-b', invitation: 11,
+                                    inviter: 'platform' }],
+                    invite_note: '', workspace: CURRENT_WS },
+    '/api/books/accept': { accepted: true, slug: 'book-b', title: 'Book B',
+                           access: 'write' },
     '/api/books/choose': CURRENT_WS,
     '/api/vault/close': CURRENT_WS,
     '/api/books/switch': CURRENT_WS,
@@ -512,6 +518,10 @@ function check(name, cond, got) {
         els['import-drafts-where'].textContent.includes('chapters/Chapter 6.md') &&
         els['import-drafts-where'].textContent.includes('“drafts”'),
         els['import-drafts-where'].textContent);
+  check('a new chapter shows the one line the front page gets under Contents',
+        said(els['import-drafts-removed']).includes('[[chapters/Chapter 6|Chapter 6]]') &&
+        said(els['import-drafts-removed']).includes('Nothing else on the front page changes'),
+        said(els['import-drafts-removed']));
   check('nothing is sent until the author says they have looked',
         els['do-send-drafts'].disabled === true, els['do-send-drafts'].disabled);
   els['import-confirm'].checked = true;
@@ -601,6 +611,20 @@ function check(name, cond, got) {
         els['books-hidden'].textContent.includes('2 other books') &&
         els['books-hidden'].textContent.includes('can’t make changes'),
         els['books-hidden'].textContent);
+
+  check('an invitation to a book is offered above the list, with who sent it',
+        !els['books-invites-box'].classList.contains('hidden') &&
+        text(els['books-invites']).includes('Book B') &&
+        text(els['books-invites']).includes('platform'),
+        text(els['books-invites']));
+  await els['books-invites'].children[0].children[0].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('accepting sends that invitation, then chooses the book straight away',
+        bodies['/api/books/accept'] && bodies['/api/books/accept'].invitation === 11 &&
+        bodies['/api/books/choose'] && bodies['/api/books/choose'].slug === 'book-b',
+        [bodies['/api/books/accept'], bodies['/api/books/choose']]);
+  await ctx.document.getElementById('go-console').onclick();
+  await new Promise(r => setTimeout(r, 30));
 
   await els['books-list'].children[0].children[0].onclick();
   await new Promise(r => setTimeout(r, 30));
