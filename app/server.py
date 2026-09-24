@@ -18,7 +18,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import (config, console, contents, convert, drafts, github, keychain,
-               llm, picker, registry)
+               llm, picker, preview, registry)
 from .session import DraftsSession, Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1652,6 +1652,20 @@ def r_console_load(handler, data):
     return out
 
 
+def r_console_preview(handler, data):
+    """Whether the drafts preview has caught up with the drafts area.
+
+    Asked on its own, not in `load`, so the page can ask again while the
+    preview rebuilds without reloading everything else.
+    """
+    token = _token()
+    if not token:
+        _needs_signin()
+    book = _book_for(data)
+    return {"book": book.slug,
+            "preview": console.describe_preview(preview.check(token, book))}
+
+
 def _loaded_suggestion(book, number):
     """The suggestion as this app fetched it for this book, never as the page
     sends it back."""
@@ -2280,6 +2294,7 @@ ROUTES = {
     "/api/console/signout": r_console_signout,
     "/api/console/pick-vault": r_console_pick_vault,
     "/api/console/load": r_console_load,
+    "/api/console/preview": r_console_preview,
     "/api/console/plan": r_console_plan,
     "/api/console/accept": r_console_accept,
     "/api/console/decline": r_console_decline,

@@ -959,6 +959,9 @@ function renderImportDone() {
   }
   if (r) box.appendChild(el('p', '',
     'If Obsidian is open, the new chapter appears in it on its own.'));
+  document.getElementById('import-preview-status').textContent = '';
+  if (s) checkDraftsPreview('import');
+  else document.getElementById('import-preview').classList.add('hidden');
 
   document.getElementById('import-analyse').classList.toggle('hidden', !r);
   document.getElementById('import-analyse-card').classList.toggle('hidden', !r);
@@ -1633,6 +1636,8 @@ async function loadConsole() {
   if (!WS.book || data.book.slug !== WS.book.slug) return loadConsole();
   C.data = data;
   renderConsole();
+  document.getElementById('preview-status').textContent = '';
+  checkDraftsPreview('console');
 }
 
 document.getElementById('console-refresh').onclick = async () => {
@@ -2044,6 +2049,71 @@ document.getElementById('draft-decline').onclick = async () => {
     consoleDone('Declined', r.steps);
   } catch (e) { fail(e.message); } finally { btn.disabled = false; }
 };
+
+/* --- the drafts preview --- */
+/* A book on the platform's builder has a preview of its drafts area, rebuilt
+   each time the drafts move. The app compares what the preview was built from
+   with the drafts area, and says "building" until they agree, then offers the
+   link. Ten minutes without agreeing, it says so: nobody else would notice a
+   build that failed. It asks again while the screen is showing. */
+
+const P = { timer: null, where: null };
+const PREVIEW_PLACES = {
+  console: { step: 'step-console', box: 'preview-block',
+             status: 'preview-status', link: 'preview-link' },
+  import: { step: 'step-import-done', box: 'import-preview',
+            status: 'import-preview-status', link: 'import-preview-link' },
+};
+const PREVIEW_AGAIN = { building: 20000, stale: 60000, unknown: 60000 };
+
+function stopPreview() {
+  if (P.timer) { clearTimeout(P.timer); P.timer = null; }
+  P.where = null;
+}
+
+function drawDraftsPreview(where, p, checking) {
+  const at = PREVIEW_PLACES[where];
+  const status = document.getElementById(at.status);
+  const link = document.getElementById(at.link);
+  status.textContent = checking ? 'Checking the preview of the drafts area…'
+    : p.words;
+  status.className = !checking && p.state === 'stale' ? 'notice bad' : '';
+  link.classList.toggle('hidden', !(p && p.url));
+  if (p && p.url) { link.href = p.url; link.textContent = p.link; }
+}
+
+async function checkDraftsPreview(where) {
+  const at = PREVIEW_PLACES[where];
+  const book = WS.book;
+  if (P.where !== where) stopPreview();
+  if (P.timer) { clearTimeout(P.timer); P.timer = null; }
+  document.getElementById(at.box).classList.toggle('hidden', !(book && book.drafts_preview));
+  if (!book || !book.drafts_preview) return;
+  P.where = where;
+  const slug = book.slug;
+  if (!document.getElementById(at.status).textContent) drawDraftsPreview(where, null, true);
+  let p;
+  try {
+    const r = await bookApi('/api/console/preview', {});
+    if (r.book !== slug) return;
+    p = r.preview;
+  } catch (e) {
+    p = { state: 'unknown', words: 'Whether the preview is up to date couldn\'t be checked just now.',
+          url: null };
+  }
+  // The author may have moved on, or to another book, while this was asked.
+  if (P.where !== where || bookSlug() !== slug
+      || document.getElementById(at.step).classList.contains('hidden')) return;
+  if (!p) return document.getElementById(at.box).classList.add('hidden');
+  drawDraftsPreview(where, p);
+  const again = PREVIEW_AGAIN[p.state];
+  if (again) P.timer = setTimeout(() => {
+    P.timer = null;
+    if (P.where === where && !document.getElementById(at.step).classList.contains('hidden')) {
+      checkDraftsPreview(where);
+    }
+  }, again);
+}
 
 /* --- going live --- */
 

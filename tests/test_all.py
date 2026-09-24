@@ -3263,6 +3263,179 @@ check("going live on a built book says the new words",
 _server.r_books_choose(None, {"slug": "book-a"})
 
 
+# --- the drafts preview (BOOK-ONE-TO-QUARTZ §8 step 12) ---------------------
+
+from app import preview as _preview  # noqa: E402
+
+# Book one as the registry has it from 24 Sep: still on Publish, with the
+# builder building a preview on its own Pages project.
+_PV_ENTRY = {
+    "slug": "social-research-methods", "status": "live",
+    "content": {"repo": "o/srm", "live_branch": "main", "drafts_branch": "drafts"},
+    "site": {"domain": "srm.example",
+             "host": {"kind": "obsidian-publish", "site_id": "x",
+                      "publish_host": "publish-01.obsidian.md",
+                      "builder": "quartz-book",
+                      "project": "social-research-methods"}}}
+_pv = _registry.Book(_PV_ENTRY)
+check("a Publish book on the builder has a drafts preview on its Pages project",
+      _pv.drafts_preview == "https://drafts.social-research-methods.pages.dev/"
+      and _pv.drafts_marker_url
+      == "https://drafts.social-research-methods.pages.dev/.well-known/textbook.json",
+      _pv.drafts_preview)
+check("and is still published from the folder, so going live keeps its wording",
+      _pv.from_folder and any("Obsidian" in t for t in _console.published_steps(_pv)))
+check("a book without the builder has no preview, and the page is told so",
+      _BOOK.drafts_preview is None and _BOOK_B.drafts_preview is None
+      and _BOOK.describe()["drafts_preview"] is None
+      and _pv.describe()["drafts_preview"] == _pv.drafts_preview)
+_pv_b = _registry.Book(dict(_PV_ENTRY, content=dict(
+    _PV_ENTRY["content"], drafts_branch="Staging/Next_Week")))
+check("a drafts branch's address is named as quartz-book's branchAlias names it",
+      _pv_b.drafts_preview
+      == "https://staging-next-week.social-research-methods.pages.dev/"
+      and _registry.branch_alias("a" * 40) == "a" * 28)
+_pv_bad = _registry.Book(json.loads(json.dumps(_PV_ENTRY).replace(
+    '"social-research-methods"}', '"evil.example/x"}')))
+check("a project name that isn't one is never put into an address",
+      _pv_bad.drafts_preview is None)
+
+_HEAD = "a" * 40
+_OLD = "b" * 40
+_T0 = 1790000000   # a commit time; the checks below run "now" from it
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _preview_at(marker, head=(_HEAD, _iso(_T0)), after=0):
+    real_head, real_marker = _github.drafts_head_dated, _preview.fetch_marker
+    seen = []
+    _github.drafts_head_dated = lambda token, book: head
+    _preview.fetch_marker = lambda url: seen.append(url) or marker
+    try:
+        return _preview.check("a-token", _pv, now=_T0 + after), seen
+    finally:
+        _github.drafts_head_dated, _preview.fetch_marker = real_head, real_marker
+
+
+def _marker(commit, **extra):
+    return dict({"slug": "social-research-methods", "branch": "drafts",
+                 "book_commit": commit, "registry_digest": "sha256:x",
+                 "builder_commit": "c" * 40}, **extra)
+
+
+_p, _seen = _preview_at(_marker(_HEAD), after=30)
+check("the preview is current once its marker names the drafts head",
+      _p["state"] == "current" and _seen == [_pv.drafts_marker_url], _p)
+_d = _console.describe_preview(_p)
+check("and then the link is offered as “See the drafts”",
+      _d["url"] == _pv.drafts_preview and _d["link"] == "See the drafts", _d)
+_p, _ = _preview_at(_marker(_OLD), after=60)
+_d = _console.describe_preview(_p)
+check("a marker behind the head is “building”, with no link yet",
+      _p["state"] == "building" and _d["url"] is None
+      and "being rebuilt" in _d["words"], _d)
+_p, _ = _preview_at(_marker(_OLD), after=9 * 60 + 59)
+check("still building at nine minutes and 59 seconds", _p["state"] == "building")
+_p, _ = _preview_at(_marker(_OLD), after=10 * 60)
+_d = _console.describe_preview(_p)
+check("ten minutes on, the author is told the preview is at the previous version",
+      _p["state"] == "stale" and "still at your previous version" in _d["words"]
+      and _d["url"] == _pv.drafts_preview and "last showed" in _d["link"], _d)
+_p, _ = _preview_at(None, after=11 * 60)
+_d = _console.describe_preview(_p)
+check("with no preview built at all, the notice doesn't speak of a previous version",
+      _p["state"] == "stale" and "no preview" in _d["words"] and _d["url"] is None, _d)
+_p, _ = _preview_at(_marker(_HEAD, branch="main"), after=11 * 60)
+check("another branch's marker is never taken for the drafts preview's",
+      _p["state"] == "stale", _p)
+_p, _ = _preview_at(_marker(_HEAD, slug="another-book"), after=60)
+check("nor another book's", _p["state"] == "building", _p)
+_p, _ = _preview_at(_marker(_OLD), head=(_HEAD, None), after=3600)
+check("a head with no readable time never raises a false alarm",
+      _p["state"] == "building", _p)
+_p, _ = _preview_at(_github.Problem("offline", offline=True))
+_d = _console.describe_preview(_p)
+check("a marker that can't be fetched is “unknown”, not “building”",
+      _p["state"] == "unknown" and _d["offline"] and _d["url"] == _pv.drafts_preview, _d)
+_p, _ = _preview_at(_marker(_HEAD), head=_github.Problem("no"))
+check("so is a drafts area that can't be read", _p["state"] == "unknown", _p)
+check("a book with no preview isn't checked at all",
+      _preview.check("a-token", _BOOK) is None
+      and _console.describe_preview(None) is None)
+
+_calls = []
+_real_check = _preview.check
+_preview.check = lambda token, book: _calls.append(book.slug) or None
+try:
+    _pv_r = _with_service(_Service(), lambda: _server.r_console_preview(
+        None, {"book": "book-a"}))
+    try:
+        _with_service(_Service(), lambda: _server.r_console_preview(
+            None, {"book": "book-b"}))
+        _pv_refused = False
+    except KeyError:
+        _pv_refused = True
+finally:
+    _preview.check = _real_check
+check("the page asks about the chosen book's preview, and only that book's",
+      _pv_r == {"book": "book-a", "preview": None} and _calls == ["book-a"]
+      and _pv_refused, (_pv_r, _calls))
+
+class _Commits(_Service):
+    def request(self, method, url, token=None, payload=None, accept=None):
+        self.calls.append((method, url, payload))
+        return [{"sha": _HEAD, "commit": {"committer": {"date": _iso(_T0)}}}]
+
+
+_cs = _Commits()
+_hd = _with_service(_cs, lambda: _github.drafts_head_dated("a-token", _pv_b))
+check("the drafts head and its commit time come from the book's drafts branch",
+      _hd == (_HEAD, _iso(_T0))
+      and _cs.calls[0][1].endswith("/repos/o/srm/commits?sha=Staging%2FNext_Week&per_page=1"),
+      (_hd, _cs.calls))
+
+# The marker is fetched for real here, from a local server, so the parsing and
+# the 404 are the code that runs.
+import http.server as _hs  # noqa: E402
+import threading as _th    # noqa: E402
+
+
+class _MarkerHandler(_hs.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/ok"):
+            body = json.dumps(_marker(_HEAD)).encode()
+            self.send_response(200)
+        elif self.path.startswith("/junk"):
+            body = b"<html>not json</html>"
+            self.send_response(200)
+        else:
+            body = b"not found"
+            self.send_response(404 if self.path.startswith("/none") else 503)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_ms = _hs.ThreadingHTTPServer(("127.0.0.1", 0), _MarkerHandler)
+_th.Thread(target=_ms.serve_forever, daemon=True).start()
+_mbase = f"http://127.0.0.1:{_ms.server_address[1]}"
+_m_ok = _preview.fetch_marker(_mbase + "/ok")
+_m_none = _preview.fetch_marker(_mbase + "/none")
+_m_junk = _preview.fetch_marker(_mbase + "/junk")
+_m_down = _preview.fetch_marker(_mbase + "/down")
+_ms.shutdown()
+check("a served marker is read; a missing one means no build yet; others are problems",
+      _m_ok == _marker(_HEAD) and _m_none is None
+      and isinstance(_m_junk, _github.Problem)
+      and isinstance(_m_down, _github.Problem), (_m_ok, _m_none, _m_junk, _m_down))
+
+
 # --- "Download a copy" -------------------------------------------------------
 
 def _tarball(entries):

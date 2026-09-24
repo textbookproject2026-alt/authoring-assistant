@@ -136,6 +136,7 @@ let planReply = null;       // in place of PLAN, when set
 let planGate = null;        // while set, the plan is held back until it settles
 let lastHeaders = null;
 let wrongBuild = null;      // how an app of another version answers, when set
+let previewReplies = [];    // what the drafts preview check answers, in turn
 const PLAN = {
   can_apply: true, reason: '', line_no: 3, before: 'The the words are here.',
   after: 'The words are here.', head: 'h1', branch: 'drafts', plan_id: 'p1',
@@ -243,6 +244,9 @@ const fetch = async (route, opts) => {
         can_publish: true,
       },
     },
+    '/api/console/preview': route === '/api/console/preview'
+      ? (previewReplies.shift() || { book: CURRENT_WS.book && CURRENT_WS.book.slug, preview: null })
+      : null,
     '/api/console/publish': { done: true, steps: [
       'The drafts were sent to the live book.',
       'The site rebuilds itself from there, which takes a few minutes. Readers see the change once it has.',
@@ -573,6 +577,9 @@ function check(name, cond, got) {
         !els['step-import-done'].classList.contains('hidden') &&
         els['import-done-title'].textContent === 'The chapter is in the drafts area',
         els['import-done-title'].textContent);
+  check('a book with no drafts preview shows none, and the app is not asked about one',
+        els['import-preview'].classList.contains('hidden') &&
+        !calls.includes('/api/console/preview'), calls.filter(c => c.includes('preview')));
   check('and where it went, and that readers do not see it yet',
         said(els['import-done-summary']).includes('chapters/Chapter 6.md') &&
         said(els['import-done-summary']).includes("Readers don't see it"),
@@ -1087,6 +1094,86 @@ function check(name, cond, got) {
         els['sug-made'].classList.contains('hidden'));
   consoleSuggestions.length = 0;
   planReply = null;
+
+  // --- the drafts preview (§8 step 12) ---------------------------------------
+
+  const BOOK_P = Object.assign({}, BOOK_A, {
+    slug: 'social-research-methods', title: 'Social Research Methods',
+    from_folder: true,
+    drafts_preview: 'https://drafts.social-research-methods.pages.dev/',
+  });
+  const WS_P = Object.assign({}, WS_A, { book: BOOK_P });
+  const pv = (state, words, url, link) => ({ book: 'social-research-methods',
+    preview: { state, words, url: url || null, link: link || null, head: 'c0ffee', offline: false } });
+  const BUILDING = pv('building', 'The preview is being rebuilt with the latest change to the drafts area.');
+  const CURRENT = pv('current', 'The preview shows the drafts area as it stands.',
+                     BOOK_P.drafts_preview, 'See the drafts');
+  const STALE = pv('stale', 'The preview is still at your previous version.',
+                   BOOK_P.drafts_preview, 'See the drafts as the preview last showed them');
+
+  CURRENT_WS = WS_P;
+  ctx.renderWorkspace(WS_P);
+  // Straight after "Send to drafts": the sent screen says it is building.
+  previewReplies = [BUILDING];
+  vm.runInContext(`W.sent = { sent: true, sha: 'c0ffee', repo: 'o/srm', branch: 'drafts',
+    chapter_path: 'chapters/Chapter 6.md', files: 1, removed: 0 }; W.saved = null;
+    renderImportDone(); show('step-import-done');`, ctx);
+  await new Promise(r => setTimeout(r, 20));
+  check('after sending, the sent screen says the preview is building, with no link yet',
+        !els['import-preview'].classList.contains('hidden') &&
+        els['import-preview-status'].textContent.includes('being rebuilt') &&
+        els['import-preview-link'].classList.contains('hidden') &&
+        bodies['/api/console/preview'].book === 'social-research-methods',
+        [els['import-preview-status'].textContent, bodies['/api/console/preview']]);
+  check('and it will ask again by itself', vm.runInContext('P.timer', ctx) !== null);
+  previewReplies = [CURRENT];
+  await ctx.checkDraftsPreview('import');
+  await new Promise(r => setTimeout(r, 10));
+  check('once the preview has caught up, the link is offered',
+        !els['import-preview-link'].classList.contains('hidden') &&
+        els['import-preview-link'].href === BOOK_P.drafts_preview &&
+        els['import-preview-link'].textContent === 'See the drafts' &&
+        vm.runInContext('P.timer', ctx) === null,
+        [els['import-preview-link'].href, els['import-preview-link'].textContent]);
+
+  // The console, on the same book.
+  previewReplies = [BUILDING];
+  await ctx.loadConsole();
+  await new Promise(r => setTimeout(r, 20));
+  check('the console shows the drafts preview building, with no link yet',
+        !els['preview-block'].classList.contains('hidden') &&
+        els['preview-status'].textContent.includes('being rebuilt') &&
+        els['preview-link'].classList.contains('hidden'),
+        els['preview-status'].textContent);
+  previewReplies = [CURRENT];
+  await ctx.checkDraftsPreview('console');
+  await new Promise(r => setTimeout(r, 10));
+  check('then “See the drafts”, once the marker reaches the drafts head',
+        !els['preview-link'].classList.contains('hidden') &&
+        els['preview-link'].href === BOOK_P.drafts_preview &&
+        els['preview-link'].textContent === 'See the drafts', els['preview-link'].textContent);
+  previewReplies = [STALE];
+  await ctx.checkDraftsPreview('console');
+  await new Promise(r => setTimeout(r, 10));
+  check('ten minutes behind, the notice is shown as a problem, and names the earlier version',
+        els['preview-status'].textContent.includes('still at your previous version') &&
+        els['preview-status'].className === 'notice bad' &&
+        els['preview-link'].textContent.includes('last showed'),
+        [els['preview-status'].className, els['preview-link'].textContent]);
+  check('going live is still shown beside the preview',
+        !els['publish-block'].classList.contains('hidden'));
+  ctx.show('step-choose');
+  const asked = calls.filter(c => c === '/api/console/preview').length;
+  vm.runInContext('if (P.timer) { const t = P.timer; clearTimeout(t); P.timer = null; ' +
+                  "checkDraftsPreview('console'); }", ctx);
+  await new Promise(r => setTimeout(r, 10));
+  check('a check that comes back after the author has left the screen schedules no other',
+        calls.filter(c => c === '/api/console/preview').length === asked + 1 &&
+        vm.runInContext('P.timer', ctx) === null,
+        calls.filter(c => c === '/api/console/preview').length - asked);
+  vm.runInContext('stopPreview()', ctx);
+  CURRENT_WS = WS_A;
+  ctx.renderWorkspace(WS_A);
 
   // --- the window and the app behind it are the same version -------------------
 

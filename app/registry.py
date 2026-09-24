@@ -47,6 +47,8 @@ FETCH_TIMEOUT = 8
 CONFIG_NAME = "textbook.config.json"
 
 SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+# A Cloudflare Pages project name. Anything else is not put into an address.
+PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 STATUSES = ("preview", "live", "retired")
 
@@ -77,7 +79,12 @@ class Book:
         # How readers are served: "obsidian-publish" while a book is still on
         # Publish, which uploads from the author's own folder. Anything else is
         # built from the repository.
-        self.host_kind = host.get("kind") if isinstance(host, dict) else None
+        host = host if isinstance(host, dict) else {}
+        self.host_kind = host.get("kind")
+        # Set when the platform's builder builds this book, whether readers
+        # are served by it or still by Publish (then it builds a preview only).
+        self.builder = host.get("builder")
+        self.project = host.get("project")
 
     @property
     def from_folder(self):
@@ -87,6 +94,24 @@ class Book:
     @property
     def origin(self):
         return f"https://{self.domain}" if self.domain else None
+
+    @property
+    def drafts_preview(self):
+        """Where the builder serves the drafts branch, or None.
+
+        The drafts branch is deployed to its alias on the book's Pages project,
+        named the way quartz-book's `branchAlias` names it (builder/lib.mjs).
+        """
+        if not (self.builder and isinstance(self.project, str)
+                and PROJECT_RE.match(self.project)):
+            return None
+        return f"https://{branch_alias(self.drafts_branch)}.{self.project}.pages.dev/"
+
+    @property
+    def drafts_marker_url(self):
+        """The drafts preview's build marker, which says what it was built from."""
+        root = self.drafts_preview
+        return root + ".well-known/textbook.json" if root else None
 
     @property
     def discussion_url(self):
@@ -116,10 +141,16 @@ class Book:
             "discussion_url": self.discussion_url,
             "history_url": self.history_url,
             "from_folder": self.from_folder,
+            "drafts_preview": self.drafts_preview,
         }
 
     def __repr__(self):
         return f"Book({self.slug!r}, {self.repo!r})"
+
+
+def branch_alias(branch):
+    """The subdomain Cloudflare Pages gives a branch's deployments."""
+    return re.sub(r"[^a-z0-9]", "-", branch.lower())[:28]
 
 
 class Registry:
