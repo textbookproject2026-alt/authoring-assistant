@@ -45,7 +45,10 @@ const secondary = mkEl('secondary'); secondary.style = {};
 const warnbox = mkEl('warnbox');
 const previewH2 = mkEl('previewh2');
 
+const docListeners = {};
 const document = {
+  hidden: false,
+  addEventListener: (name, fn) => { docListeners[name] = fn; },
   body: { dataset: { token: 'T', build: '1.0.0+b1' } },
   getElementById: id => els[id] || (els[id] = mkEl(id)),
   createElement: tag => mkEl(tag),
@@ -151,9 +154,11 @@ let signinReply = { waiting: true, wait: 5 };
 // converter is missing and the one shown once it has been installed.
 let IMPORT_READY = { ready: false, where: null, version: null, can_install: true };
 const calls = [];
+let pingDown = false;   // the tool has stopped: its address no longer answers
 const fetch = async (route, opts) => {
   calls.push(route);
   lastHeaders = opts.headers || {};
+  if (pingDown && route.startsWith('/api/ping')) throw new TypeError('Failed to fetch');
   if (wrongBuild && !route.startsWith('/api/ping')) {
     const w = wrongBuild;
     return { ok: false, status: w.status, json: async () => w.body };
@@ -1193,6 +1198,37 @@ function check(name, cond, got) {
   check('so does an older app that has never heard of the request',
         versionSaid.includes('Please quit and reopen the app.'), versionSaid);
   wrongBuild = null;
+
+  // --- a tab in the background -------------------------------------------------
+  // A hidden tab's timers run late, so the tool is told the tab is hidden and
+  // waits longer. The tool stopping anyway is said plainly once the tab shows.
+
+  const pingRoute = '/api/ping?t=T';
+  check('a check-in from a showing tab says it is not hidden',
+        bodies[pingRoute] && bodies[pingRoute].hidden === false, bodies[pingRoute]);
+  document.hidden = true;
+  docListeners.visibilitychange();
+  await new Promise(r => setTimeout(r, 10));
+  check('hiding the tab checks in at once, saying it is hidden',
+        bodies[pingRoute].hidden === true, bodies[pingRoute]);
+  ctx.show('step-console');
+  pingDown = true;
+  docListeners.visibilitychange();
+  await new Promise(r => setTimeout(r, 10));
+  check('a check-in that fails while the tab is hidden changes nothing yet',
+        els['step-stopped'].classList.contains('hidden'));
+  document.hidden = false;
+  docListeners.visibilitychange();
+  await new Promise(r => setTimeout(r, 10));
+  check('showing the tab again after the tool stopped says it stopped, and why',
+        !els['step-stopped'].classList.contains('hidden')
+        && !els['stopped-away'].classList.contains('hidden'));
+  const pingsAfter = calls.filter(c => c.startsWith('/api/ping')).length;
+  docListeners.visibilitychange();
+  await new Promise(r => setTimeout(r, 10));
+  check('and it stops checking in',
+        calls.filter(c => c.startsWith('/api/ping')).length === pingsAfter);
+  pingDown = false;
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

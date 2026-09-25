@@ -1162,23 +1162,42 @@ function refreshDeepseekOption() {
 /* ---------- quitting cleanly ---------- */
 
 document.getElementById('quit-app').onclick = async () => {
-  try { await api('/api/quit', {}); } catch (e) { /* already going */ }
   stopHeartbeat();
+  try { await api('/api/quit', {}); } catch (e) { /* already going */ }
+  document.getElementById('stopped-away').classList.add('hidden');
   show('step-stopped');
 };
 
+// The page checks in every 5 seconds. A browser runs a background tab's timers
+// late, a minute apart or more, so each check-in says whether the tab is
+// hidden and the tool waits longer for a hidden one. A check-in that fails
+// while the tab is showing means the tool has stopped all the same (the Mac
+// slept, or the browser froze the tab), and the author is told so rather than
+// left with a page that no longer answers.
 let heartbeat = null;
+async function beat() {
+  try {
+    await fetch('/api/ping?t=' + encodeURIComponent(TOKEN), {
+      method: 'POST', headers: { 'X-AA-Token': TOKEN },
+      body: JSON.stringify({ hidden: !!document.hidden }),
+    });
+  } catch (e) {
+    if (heartbeat && !document.hidden) {
+      stopHeartbeat();
+      document.getElementById('stopped-away').classList.remove('hidden');
+      show('step-stopped');
+    }
+  }
+}
 function startHeartbeat() {
   if (heartbeat) return;
-  const beat = () => fetch('/api/ping?t=' + encodeURIComponent(TOKEN), {
-    method: 'POST', headers: { 'X-AA-Token': TOKEN }, body: '{}',
-  }).catch(() => {});
   beat();
   heartbeat = setInterval(beat, 5000);
 }
 function stopHeartbeat() {
   if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
 }
+document.addEventListener('visibilitychange', () => { if (heartbeat) beat(); });
 
 // Closing the tab, or quitting the browser, tells the tool to stop. A reload
 // sends the same message, which is why the tool waits a few seconds first.

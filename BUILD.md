@@ -148,14 +148,24 @@ then the interpreter with entitlements, then the launcher, then the bundle.
 
 There is no menu bar item to quit from, so the server decides for itself:
 
-- the page sends `/api/ping` every 5 seconds;
+- the page sends `/api/ping` every 5 seconds, saying whether its tab is hidden,
+  and again at once when that changes;
 - closing the tab or quitting the browser fires `navigator.sendBeacon` to
   `/api/bye`, and the server stops 12 seconds later — long enough that a page
   reload does not kill it;
 - if pings stop without a goodbye (a crashed browser, a sleeping Mac) the server
-  gives up after 60 seconds;
+  gives up after 60 seconds, or after 15 minutes if the tab was hidden. A
+  browser runs a background tab's timers late (Chrome: about once a minute,
+  once the tab has been hidden five minutes), which stopped the app during step
+  12's ten-minute wait for the preview when it gave up after 60 seconds either
+  way;
+- if a check-in fails while the tab is showing (the Mac slept, the browser froze
+  the tab), the page says the tool has stopped and to open it again;
 - if the page never appears at all, it gives up after 4 minutes;
 - **Quit** in the page's top corner stops it at once.
+
+The log (`~/Library/Application Support/Authoring Assistant/log.txt`) records
+when it stopped and which of these stopped it.
 
 `~/Library/Application Support/Authoring Assistant/runtime.json` records the port
 and token of the running copy, so a second launch reconnects instead of starting
@@ -498,7 +508,7 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 503 checks: the analyses, the file-safety promises,
+python3 -m tests.test_all     # 509 checks: the analyses, the file-safety promises,
                               #             the Word conversion, the console's
                               #             refusal rules, the path from accepting
                               #             a change to the live book, the
@@ -511,7 +521,7 @@ python3 -m tests.test_all     # 503 checks: the analyses, the file-safety promis
                               #             running app, the drafts preview's
                               #             states, and the words the
                               #             troubleshooting guide quotes
-node tests/ui_flow.js         # 154 checks: the review, drafts, import,
+node tests/ui_flow.js         # 159 checks: the review, drafts, import,
                               #            book-choosing, drafts preview and
                               #            going-live flows,
                               #            driven against the real app.js

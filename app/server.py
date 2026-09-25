@@ -32,9 +32,16 @@ SHUTDOWN = threading.Event()
 # The app has no window and no menu bar, so it has to know for itself when it is
 # no longer wanted. The page checks in every few seconds; when the checking-in
 # stops, the tab has been closed or the browser has quit, and we bow out.
-LIFE = {"started": time.time(), "last_ping": None, "closing_at": None}
+#
+# A browser runs a background tab's timers late: Chrome, once a tab has been
+# hidden for five minutes, about once a minute. So the page says whether it is
+# hidden, and a hidden page is given much longer. Waiting ten minutes for the
+# drafts preview with the tab behind another window stopped the app otherwise.
+LIFE = {"started": time.time(), "last_ping": None, "closing_at": None,
+        "hidden": False, "why": None}
 GRACE_BEFORE_FIRST_PING = 240.0   # the author may take a while to look at it
 IDLE_AFTER_LAST_PING = 60.0       # the page has gone away
+IDLE_WHILE_HIDDEN = 15 * 60.0     # a background tab still checks in, but late
 CLOSING_DELAY = 12.0              # after a goodbye, in case it is just a reload
 
 # Endpoints the page may reach with the key in the address rather than a header,
@@ -225,6 +232,7 @@ def r_clear_key(handler, data):
 def r_ping(handler, data):
     LIFE["last_ping"] = time.time()
     LIFE["closing_at"] = None
+    LIFE["hidden"] = bool(isinstance(data, dict) and data.get("hidden"))
     return {"ok": True}
 
 
@@ -946,6 +954,7 @@ def r_import_drafts_send(handler, data):
 
 
 def r_quit(handler, data):
+    LIFE["why"] = "Quit was pressed"
     _forget_import()
     threading.Timer(0.4, SHUTDOWN.set).start()
     return {"stopping": True}
@@ -2307,17 +2316,30 @@ ROUTES = {
 }
 
 
+def _why_stop(now):
+    """Why the app should stop now, or None while the page still wants it."""
+    closing = LIFE["closing_at"]
+    if closing and now > closing:
+        return "the page said goodbye"
+    if LIFE["last_ping"] is None:
+        if now - LIFE["started"] > GRACE_BEFORE_FIRST_PING:
+            return "the page never opened"
+        return None
+    quiet = now - LIFE["last_ping"]
+    if LIFE["hidden"]:
+        if quiet > IDLE_WHILE_HIDDEN:
+            return f"no word from the background tab for {int(quiet)} s"
+    elif quiet > IDLE_AFTER_LAST_PING:
+        return f"no word from the page for {int(quiet)} s"
+    return None
+
+
 def _watchdog():
     """Shut down when the page stops checking in, so nothing is left running."""
     while not SHUTDOWN.wait(2.0):
-        now = time.time()
-        closing = LIFE["closing_at"]
-        if closing and now > closing:
-            return SHUTDOWN.set()
-        if LIFE["last_ping"] is None:
-            if now - LIFE["started"] > GRACE_BEFORE_FIRST_PING:
-                return SHUTDOWN.set()
-        elif now - LIFE["last_ping"] > IDLE_AFTER_LAST_PING:
+        why = _why_stop(time.time())
+        if why:
+            LIFE["why"] = why
             return SHUTDOWN.set()
 
 
@@ -2366,7 +2388,8 @@ def main(argv=None):
         config.clear_runtime()
         _forget_import()   # a conversion abandoned half way leaves nothing behind
     httpd.shutdown()
-    print("Authoring Assistant stopped.")
+    why = f" ({LIFE['why']})" if LIFE["why"] else ""
+    print(f"Authoring Assistant stopped at {time.strftime('%Y-%m-%d %H:%M:%S')}{why}.")
     return 0
 
 

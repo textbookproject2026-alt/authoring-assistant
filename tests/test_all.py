@@ -3206,6 +3206,36 @@ check("the heartbeat still works from any build, so the old copy can be let go",
       _code == 200, _got)
 check("and so does Quit", "/api/quit" in _server.ANY_BUILD_ROUTES)
 
+# A background tab checks in late (Chrome: about once a minute after five
+# minutes hidden), so a hidden page is waited for longer. Step 12's live
+# proof lost the app this way during the ten-minute wait for the preview.
+_life = dict(_server.LIFE)
+_urlreq.urlopen(_urlreq.Request(
+    f"{_base}/api/ping?t={_server.TOKEN}", data=b'{"hidden": true}',
+    method="POST"), timeout=5).read()
+check("a check-in says whether the tab is hidden", _server.LIFE["hidden"] is True,
+      _server.LIFE)
+_post("/api/ping", None, query=True)
+check("and one that doesn't say is from a showing tab",
+      _server.LIFE["hidden"] is False, _server.LIFE)
+_t = 1_000_000.0
+_server.LIFE.update(started=_t - 999, last_ping=_t - 90, closing_at=None,
+                    hidden=False)
+check("a showing tab silent for over a minute has gone: the app stops",
+      "90 s" in (_server._why_stop(_t) or ""), _server._why_stop(_t))
+_server.LIFE["hidden"] = True
+check("a hidden tab a minute and a half late is waited for",
+      _server._why_stop(_t) is None, _server._why_stop(_t))
+_server.LIFE["last_ping"] = _t - 16 * 60
+check("but not for more than 15 minutes, so a browser that crashed while the "
+      "tab was hidden leaves nothing running",
+      "background" in (_server._why_stop(_t) or ""), _server._why_stop(_t))
+_server.LIFE.update(last_ping=_t - 1, closing_at=_t - 0.5)
+check("a goodbye still stops it, hidden or not",
+      _server._why_stop(_t) == "the page said goodbye", _server._why_stop(_t))
+_server.LIFE.clear()
+_server.LIFE.update(_life)
+
 # The live case: the files on disk were replaced after this copy started.
 _real_build = _server.BUILD
 _server.BUILD = "1.0.0+startedolder"
