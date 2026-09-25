@@ -617,3 +617,47 @@ def describe_publish(pr, compare, state, book):
         "state_words": publish_state_words(state, book),
         "can_publish": state == "clean",
     }
+
+
+# The drafts preview, for a book on the platform's builder (preview.py). The
+# link is offered once the preview shows the drafts area as it stands, and,
+# labelled as the earlier version, when it is stuck behind.
+PREVIEW_WORDS = {
+    "current": "The preview shows the drafts area as it stands.",
+    "building": (
+        "The preview is being rebuilt with the latest change to the drafts "
+        "area. That usually takes two or three minutes; this updates itself."
+    ),
+    "stale": (
+        "The preview is still at your previous version. The latest change to "
+        "the drafts area hasn't reached it after ten minutes. The change is "
+        "safe in the drafts area. If this lasts, tell the technical contact."
+    ),
+    "stale_none": (
+        "There is no preview of the drafts area yet, ten minutes after the "
+        "latest change. The change is safe in the drafts area. If this lasts, "
+        "tell the technical contact."
+    ),
+    "unknown": "Whether the preview is up to date couldn't be checked just now.",
+}
+
+
+def describe_preview(p):
+    """The drafts preview, in the author's words, or None if there is none."""
+    if not p:
+        return None
+    state = p["state"]
+    key = "stale_none" if state == "stale" and not p.get("has_build") else state
+    link = None
+    if state == "current":
+        link = "See the drafts"
+    elif state == "unknown" or (state == "stale" and p.get("has_build")):
+        link = "See the drafts as the preview last showed them"
+    return {
+        "state": state,
+        "words": PREVIEW_WORDS.get(key, PREVIEW_WORDS["unknown"]),
+        "url": p["url"] if link else None,
+        "link": link,
+        "head": p.get("head"),
+        "offline": bool(p.get("offline")),
+    }

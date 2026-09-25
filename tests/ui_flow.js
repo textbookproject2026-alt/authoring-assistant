@@ -45,7 +45,10 @@ const secondary = mkEl('secondary'); secondary.style = {};
 const warnbox = mkEl('warnbox');
 const previewH2 = mkEl('previewh2');
 
+const docListeners = {};
 const document = {
+  hidden: false,
+  addEventListener: (name, fn) => { docListeners[name] = fn; },
   body: { dataset: { token: 'T', build: '1.0.0+b1' } },
   getElementById: id => els[id] || (els[id] = mkEl(id)),
   createElement: tag => mkEl(tag),
@@ -136,6 +139,7 @@ let planReply = null;       // in place of PLAN, when set
 let planGate = null;        // while set, the plan is held back until it settles
 let lastHeaders = null;
 let wrongBuild = null;      // how an app of another version answers, when set
+let previewReplies = [];    // what the drafts preview check answers, in turn
 const PLAN = {
   can_apply: true, reason: '', line_no: 3, before: 'The the words are here.',
   after: 'The words are here.', head: 'h1', branch: 'drafts', plan_id: 'p1',
@@ -150,9 +154,11 @@ let signinReply = { waiting: true, wait: 5 };
 // converter is missing and the one shown once it has been installed.
 let IMPORT_READY = { ready: false, where: null, version: null, can_install: true };
 const calls = [];
+let pingDown = false;   // the tool has stopped: its address no longer answers
 const fetch = async (route, opts) => {
   calls.push(route);
   lastHeaders = opts.headers || {};
+  if (pingDown && route.startsWith('/api/ping')) throw new TypeError('Failed to fetch');
   if (wrongBuild && !route.startsWith('/api/ping')) {
     const w = wrongBuild;
     return { ok: false, status: w.status, json: async () => w.body };
@@ -243,6 +249,9 @@ const fetch = async (route, opts) => {
         can_publish: true,
       },
     },
+    '/api/console/preview': route === '/api/console/preview'
+      ? (previewReplies.shift() || { book: CURRENT_WS.book && CURRENT_WS.book.slug, preview: null })
+      : null,
     '/api/console/publish': { done: true, steps: [
       'The drafts were sent to the live book.',
       'The site rebuilds itself from there, which takes a few minutes. Readers see the change once it has.',
@@ -573,6 +582,9 @@ function check(name, cond, got) {
         !els['step-import-done'].classList.contains('hidden') &&
         els['import-done-title'].textContent === 'The chapter is in the drafts area',
         els['import-done-title'].textContent);
+  check('a book with no drafts preview shows none, and the app is not asked about one',
+        els['import-preview'].classList.contains('hidden') &&
+        !calls.includes('/api/console/preview'), calls.filter(c => c.includes('preview')));
   check('and where it went, and that readers do not see it yet',
         said(els['import-done-summary']).includes('chapters/Chapter 6.md') &&
         said(els['import-done-summary']).includes("Readers don't see it"),
@@ -1088,6 +1100,86 @@ function check(name, cond, got) {
   consoleSuggestions.length = 0;
   planReply = null;
 
+  // --- the drafts preview (§8 step 12) ---------------------------------------
+
+  const BOOK_P = Object.assign({}, BOOK_A, {
+    slug: 'social-research-methods', title: 'Social Research Methods',
+    from_folder: true,
+    drafts_preview: 'https://drafts.social-research-methods.pages.dev/',
+  });
+  const WS_P = Object.assign({}, WS_A, { book: BOOK_P });
+  const pv = (state, words, url, link) => ({ book: 'social-research-methods',
+    preview: { state, words, url: url || null, link: link || null, head: 'c0ffee', offline: false } });
+  const BUILDING = pv('building', 'The preview is being rebuilt with the latest change to the drafts area.');
+  const CURRENT = pv('current', 'The preview shows the drafts area as it stands.',
+                     BOOK_P.drafts_preview, 'See the drafts');
+  const STALE = pv('stale', 'The preview is still at your previous version.',
+                   BOOK_P.drafts_preview, 'See the drafts as the preview last showed them');
+
+  CURRENT_WS = WS_P;
+  ctx.renderWorkspace(WS_P);
+  // Straight after "Send to drafts": the sent screen says it is building.
+  previewReplies = [BUILDING];
+  vm.runInContext(`W.sent = { sent: true, sha: 'c0ffee', repo: 'o/srm', branch: 'drafts',
+    chapter_path: 'chapters/Chapter 6.md', files: 1, removed: 0 }; W.saved = null;
+    renderImportDone(); show('step-import-done');`, ctx);
+  await new Promise(r => setTimeout(r, 20));
+  check('after sending, the sent screen says the preview is building, with no link yet',
+        !els['import-preview'].classList.contains('hidden') &&
+        els['import-preview-status'].textContent.includes('being rebuilt') &&
+        els['import-preview-link'].classList.contains('hidden') &&
+        bodies['/api/console/preview'].book === 'social-research-methods',
+        [els['import-preview-status'].textContent, bodies['/api/console/preview']]);
+  check('and it will ask again by itself', vm.runInContext('P.timer', ctx) !== null);
+  previewReplies = [CURRENT];
+  await ctx.checkDraftsPreview('import');
+  await new Promise(r => setTimeout(r, 10));
+  check('once the preview has caught up, the link is offered',
+        !els['import-preview-link'].classList.contains('hidden') &&
+        els['import-preview-link'].href === BOOK_P.drafts_preview &&
+        els['import-preview-link'].textContent === 'See the drafts' &&
+        vm.runInContext('P.timer', ctx) === null,
+        [els['import-preview-link'].href, els['import-preview-link'].textContent]);
+
+  // The console, on the same book.
+  previewReplies = [BUILDING];
+  await ctx.loadConsole();
+  await new Promise(r => setTimeout(r, 20));
+  check('the console shows the drafts preview building, with no link yet',
+        !els['preview-block'].classList.contains('hidden') &&
+        els['preview-status'].textContent.includes('being rebuilt') &&
+        els['preview-link'].classList.contains('hidden'),
+        els['preview-status'].textContent);
+  previewReplies = [CURRENT];
+  await ctx.checkDraftsPreview('console');
+  await new Promise(r => setTimeout(r, 10));
+  check('then “See the drafts”, once the marker reaches the drafts head',
+        !els['preview-link'].classList.contains('hidden') &&
+        els['preview-link'].href === BOOK_P.drafts_preview &&
+        els['preview-link'].textContent === 'See the drafts', els['preview-link'].textContent);
+  previewReplies = [STALE];
+  await ctx.checkDraftsPreview('console');
+  await new Promise(r => setTimeout(r, 10));
+  check('ten minutes behind, the notice is shown as a problem, and names the earlier version',
+        els['preview-status'].textContent.includes('still at your previous version') &&
+        els['preview-status'].className === 'notice bad' &&
+        els['preview-link'].textContent.includes('last showed'),
+        [els['preview-status'].className, els['preview-link'].textContent]);
+  check('going live is still shown beside the preview',
+        !els['publish-block'].classList.contains('hidden'));
+  ctx.show('step-choose');
+  const asked = calls.filter(c => c === '/api/console/preview').length;
+  vm.runInContext('if (P.timer) { const t = P.timer; clearTimeout(t); P.timer = null; ' +
+                  "checkDraftsPreview('console'); }", ctx);
+  await new Promise(r => setTimeout(r, 10));
+  check('a check that comes back after the author has left the screen schedules no other',
+        calls.filter(c => c === '/api/console/preview').length === asked + 1 &&
+        vm.runInContext('P.timer', ctx) === null,
+        calls.filter(c => c === '/api/console/preview').length - asked);
+  vm.runInContext('stopPreview()', ctx);
+  CURRENT_WS = WS_A;
+  ctx.renderWorkspace(WS_A);
+
   // --- the window and the app behind it are the same version -------------------
 
   await ctx.api('/api/env', {});
@@ -1106,6 +1198,37 @@ function check(name, cond, got) {
   check('so does an older app that has never heard of the request',
         versionSaid.includes('Please quit and reopen the app.'), versionSaid);
   wrongBuild = null;
+
+  // --- a tab in the background -------------------------------------------------
+  // A hidden tab's timers run late, so the tool is told the tab is hidden and
+  // waits longer. The tool stopping anyway is said plainly once the tab shows.
+
+  const pingRoute = '/api/ping?t=T';
+  check('a check-in from a showing tab says it is not hidden',
+        bodies[pingRoute] && bodies[pingRoute].hidden === false, bodies[pingRoute]);
+  document.hidden = true;
+  docListeners.visibilitychange();
+  await new Promise(r => setTimeout(r, 10));
+  check('hiding the tab checks in at once, saying it is hidden',
+        bodies[pingRoute].hidden === true, bodies[pingRoute]);
+  ctx.show('step-console');
+  pingDown = true;
+  docListeners.visibilitychange();
+  await new Promise(r => setTimeout(r, 10));
+  check('a check-in that fails while the tab is hidden changes nothing yet',
+        els['step-stopped'].classList.contains('hidden'));
+  document.hidden = false;
+  docListeners.visibilitychange();
+  await new Promise(r => setTimeout(r, 10));
+  check('showing the tab again after the tool stopped says it stopped, and why',
+        !els['step-stopped'].classList.contains('hidden')
+        && !els['stopped-away'].classList.contains('hidden'));
+  const pingsAfter = calls.filter(c => c.startsWith('/api/ping')).length;
+  docListeners.visibilitychange();
+  await new Promise(r => setTimeout(r, 10));
+  check('and it stops checking in',
+        calls.filter(c => c.startsWith('/api/ping')).length === pingsAfter);
+  pingDown = false;
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

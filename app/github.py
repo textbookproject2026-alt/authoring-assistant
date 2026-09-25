@@ -507,6 +507,22 @@ def branch_tip(token, book):
     return sha, tree
 
 
+def drafts_head_dated(token, book):
+    """(the commit the drafts branch points at, when it was committed, as
+    GitHub writes it), or a Problem."""
+    result = _request("GET", f"{API}/repos/{book.repo}/commits?sha="
+                      f"{urllib.parse.quote(book.drafts_branch, safe='')}"
+                      "&per_page=1", token=token)
+    if isinstance(result, Problem):
+        return result
+    item = result[0] if isinstance(result, list) and result else {}
+    sha = item.get("sha")
+    when = ((item.get("commit") or {}).get("committer") or {}).get("date")
+    if not sha:
+        return Problem("The drafts area could not be read. Nothing was changed.")
+    return sha, when
+
+
 def whole_tree(token, book, tree_sha):
     """Every file in a tree, with the flag saying whether the list was cut short.
 

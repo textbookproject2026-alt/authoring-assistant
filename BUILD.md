@@ -148,14 +148,24 @@ then the interpreter with entitlements, then the launcher, then the bundle.
 
 There is no menu bar item to quit from, so the server decides for itself:
 
-- the page sends `/api/ping` every 5 seconds;
+- the page sends `/api/ping` every 5 seconds, saying whether its tab is hidden,
+  and again at once when that changes;
 - closing the tab or quitting the browser fires `navigator.sendBeacon` to
   `/api/bye`, and the server stops 12 seconds later — long enough that a page
   reload does not kill it;
 - if pings stop without a goodbye (a crashed browser, a sleeping Mac) the server
-  gives up after 60 seconds;
+  gives up after 60 seconds, or after 15 minutes if the tab was hidden. A
+  browser runs a background tab's timers late (Chrome: about once a minute,
+  once the tab has been hidden five minutes), which stopped the app during step
+  12's ten-minute wait for the preview when it gave up after 60 seconds either
+  way;
+- if a check-in fails while the tab is showing (the Mac slept, the browser froze
+  the tab), the page says the tool has stopped and to open it again;
 - if the page never appears at all, it gives up after 4 minutes;
 - **Quit** in the page's top corner stops it at once.
+
+The log (`~/Library/Application Support/Authoring Assistant/log.txt`) records
+when it stopped and which of these stopped it.
 
 `~/Library/Application Support/Authoring Assistant/runtime.json` records the port
 and token of the running copy, so a second launch reconnects instead of starting
@@ -382,6 +392,33 @@ work again (`drafts.send`, `MOVED*`).
   regular files only into a new folder (`drafts.unpack_copy`); links and paths
   leading out of it are left out.
 
+### The drafts preview (BOOK-ONE-TO-QUARTZ §8 step 12)
+
+A book whose registry entry has `site.host.builder` and `site.host.project`
+has a preview of its drafts branch at
+`https://<alias>.<project>.pages.dev/`, where `<alias>` is the drafts branch
+named as quartz-book's `branchAlias` names it (`registry.branch_alias`). That
+holds for book one while it is still on Publish (step 7, amended 24 Sep).
+`preview.check` compares the build marker the preview serves,
+`/.well-known/textbook.json` (read anonymously; it must name this book and its
+drafts branch), with the drafts head and its committer time
+(`github.drafts_head_dated`):
+
+- marker's `book_commit` = head → **current**: "See the drafts".
+- behind, head under 10 minutes old → **building**, no link.
+- behind for 10 minutes or more → **stale**: "The preview is still at your
+  previous version", with a link labelled as the earlier version (none if
+  nothing was ever built). This is §0a's notice, and the only way an author
+  learns a build failed.
+- head or marker unreadable → **unknown**.
+
+Nothing is stored: the commit time says how long the preview has had, so a
+restart gives the same answer. A head with no readable time is never called
+stale. The page asks (`/api/console/preview`) on the console and on the screen
+after "Send to drafts", again every 20 s while building and every 60 s while
+stale or unknown, and stops when the screen changes. "Going live" is unchanged:
+its wording still follows `site.host.kind`.
+
 ### The scope, and why it is narrow
 
 `app/github.py` requests **`public_repo repo:invite`**, not `repo`. The
@@ -471,7 +508,7 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 441 checks: the analyses, the file-safety promises,
+python3 -m tests.test_all     # 509 checks: the analyses, the file-safety promises,
                               #             the Word conversion, the console's
                               #             refusal rules, the path from accepting
                               #             a change to the live book, the
@@ -481,10 +518,12 @@ python3 -m tests.test_all     # 441 checks: the analyses, the file-safety promis
                               #             suggestion is told its chapter changed
                               #             only with a link to the commit, the
                               #             version check between the page and the
-                              #             running app, and the words the
+                              #             running app, the drafts preview's
+                              #             states, and the words the
                               #             troubleshooting guide quotes
-node tests/ui_flow.js         # 133 checks: the review, drafts, import,
-                              #            book-choosing and going-live flows,
+node tests/ui_flow.js         # 159 checks: the review, drafts, import,
+                              #            book-choosing, drafts preview and
+                              #            going-live flows,
                               #            driven against the real app.js
 ```
 
