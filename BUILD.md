@@ -521,7 +521,7 @@ python3 -m tests.test_all     # 509 checks: the analyses, the file-safety promis
                               #             running app, the drafts preview's
                               #             states, and the words the
                               #             troubleshooting guide quotes
-node tests/ui_flow.js         # 159 checks: the review, drafts, import,
+node tests/ui_flow.js         # 162 checks: the review, drafts, import,
                               #            book-choosing, drafts preview and
                               #            going-live flows,
                               #            driven against the real app.js

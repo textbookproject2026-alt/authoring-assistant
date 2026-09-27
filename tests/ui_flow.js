@@ -186,10 +186,11 @@ const fetch = async (route, opts) => {
     '/api/import/status': IMPORT_READY,
     '/api/import/pick-docx': {
       docx: '/Users/x/Documents/Chapter 6.docx', docx_name: 'Chapter 6.docx',
-      suggested_name: 'Chapter 6.md', size: 41000,
+      suggested_name: 'chapter-06.md', suggested_how: 'new', size: 41000,
     },
     '/api/import/pick-folder': {
       folder: '/v/Chapters', folder_name: 'Chapters', chapters_here: 5,
+      suggested_name: 'chapter-03.md', suggested_how: 'recorded',
     },
     '/api/import/convert': (() => { lastConvertBody = body; return {
       name: 'Chapter 6.md', path: '/v/Chapters/Chapter 6.md',
@@ -442,7 +443,10 @@ function check(name, cond, got) {
 
   await els['choose-docx'].onclick();
   check('choosing a Word document fills in a suggested chapter name',
-        els['import-name'].value === 'Chapter 6.md', els['import-name'].value);
+        els['import-name'].value === 'chapter-06.md', els['import-name'].value);
+  check('and says why it is that name',
+        els['name-how'].textContent.includes('next free chapter number'),
+        els['name-how'].textContent);
   check('it is still not ready, because there is nowhere to put it',
         els['do-convert'].disabled === true, els['do-convert'].disabled);
 
@@ -450,6 +454,14 @@ function check(name, cond, got) {
   check('choosing a folder says how many chapters are already there',
         els['folder-chosen'].textContent.includes('5 chapters'),
         els['folder-chosen'].textContent);
+  check('the folder\'s own suggestion replaces a name the author did not type',
+        els['import-name'].value === 'chapter-03.md'
+        && els['name-how'].textContent.includes('became this chapter last time'),
+        els['import-name'].value + ' / ' + els['name-how'].textContent);
+  els['import-name'].value = 'chapter-09.md';
+  await els['choose-import-folder'].onclick();
+  check('but never a name the author typed',
+        els['import-name'].value === 'chapter-09.md', els['import-name'].value);
   check('with all three chosen, converting is offered',
         els['do-convert'].disabled === false, els['do-convert'].disabled);
 
