@@ -371,6 +371,70 @@ check("a nameless Word file still gets a name",
       _convert.suggest_name("/x/.docx") == "Untitled chapter.md",
       "got " + _convert.suggest_name("/x/.docx"))
 
+# --- the one chapter-naming rule (27 Sep 2026) --------------------------------
+
+from app import server as _srv  # noqa: E402
+
+check("a Word file new to the book becomes the next free chapter-NN",
+      _convert.chapter_name("Chapter 3 – Reality.docx",
+                            ["chapter-01.md", "chapter-03.md", "Definitions"], {})
+      == ("chapter-04.md", "new"))
+check("the first chapter of an empty book is chapter-01",
+      _convert.chapter_name("Intro.docx", [], {}) == ("chapter-01.md", "new"))
+_src = _convert.parse_sources(
+    _convert.sources_text("", "Intro.docx", "chapters/chapter-07.md"))
+check("the same Word file again replaces the chapter it became",
+      _convert.chapter_name("Intro.docx", ["chapter-07.md"], _src)
+      == ("chapter-07.md", "recorded"))
+check("the Word file is recognised however its name's case and spacing were typed",
+      _convert.chapter_name("  INTRO.docx", [], _src) == ("chapter-07.md", "recorded"))
+check("a live book keeps a chapter named before the rule (book-requests' slug)",
+      _convert.chapter_name("Introduction.docx", ["introduction.md"], {})
+      == ("introduction.md", "existing"))
+check("a live book keeps a chapter named before the rule (the app's old suggestion)",
+      _convert.chapter_name("Chapter 4 - Structure.docx", ["Chapter 4 - Structure.md"], {})
+      == ("Chapter 4 - Structure.md", "existing"))
+check("a recorded chapter's number isn't handed out again, even if the file is gone",
+      _convert.chapter_name("Other.docx", [], _src) == ("chapter-08.md", "new"))
+_two = _convert.sources_text(
+    _convert.sources_text("", "B.docx", "chapters/chapter-02.md"),
+    "a.docx", "chapters/chapter-01.md")
+check("recording a Word file keeps every other entry",
+      _convert.parse_sources(_two) == {"b.docx": "chapters/chapter-02.md",
+                                        "a.docx": "chapters/chapter-01.md"})
+check("recording the same Word file again moves it, it doesn't add a second",
+      len(_convert.parse_sources(_convert.sources_text(_two, "A.DOCX",
+          "chapters/chapter-05.md"))) == 2)
+check("a broken chapter-sources.json is ignored, not a reason to refuse",
+      _convert.parse_sources("{not json") == {}
+      and _convert.parse_sources('["x"]') == {})
+check("a new chapter must be chapter-NN.md",
+      _convert.rule_problem("Chapter 3.md", ["chapter-01.md"]) is not None
+      and _convert.rule_problem("chapter-02.md", ["chapter-01.md"]) is None)
+check("an existing chapter may be replaced whatever its name",
+      _convert.rule_problem("introduction.md", ["introduction.md"]) is None)
+
+_nv = tempfile.mkdtemp()
+os.makedirs(os.path.join(_nv, "chapters", "Definitions"))
+os.makedirs(os.path.join(_nv, "assets"))
+open(os.path.join(_nv, "glossary.md"), "w").close()
+open(os.path.join(_nv, "chapters", "chapter-01.md"), "w").close()
+with open(os.path.join(_nv, "chapter-sources.json"), "w") as fh:
+    fh.write(_convert.sources_text("", "Old.docx", "chapters/chapter-01.md"))
+check("the rule applies in a book's chapters folder",
+      _srv._suggestion("/x/Old.docx", os.path.join(_nv, "chapters"))
+      == {"suggested_name": "chapter-01.md", "suggested_how": "recorded"}
+      and _srv._suggestion("/x/New.docx", os.path.join(_nv, "chapters"))
+      == {"suggested_name": "chapter-02.md", "suggested_how": "new"})
+check("the rule doesn't apply to a concept page in chapters/Definitions",
+      _srv._suggestion("/x/Emergence.docx", os.path.join(_nv, "chapters", "Definitions"))
+      == {"suggested_name": "Emergence.md", "suggested_how": None})
+_srv._record_source(_nv, {"docx": "/x/New.docx", "md_name": "chapter-02.md"})
+check("saving records the Word file in the book's chapter-sources.json",
+      _convert.read_sources(_nv) == {"old.docx": "chapters/chapter-01.md",
+                                     "new.docx": "chapters/chapter-02.md"})
+shutil.rmtree(_nv, ignore_errors=True)
+
 # --- refusing to write over anything ----------------------------------------
 
 # A vault to write into: the three things that make a folder the top of this
@@ -2192,14 +2256,14 @@ _DRAFTS_START = {
     "glossary.md": "# Glossary\n",
 }
 _repo = _GitRepo("example-org/book-a", _DRAFTS_START)
-_res = _converted(_wch, _wa, "Chapter 7.md", {"image1.png": _PNG1})
+_res = _converted(_wch, _wa, "chapter-07.md", {"image1.png": _PNG1})
 _start = _repo.branches["drafts"]
 _look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
 check("looking at drafts first changes nothing",
       not _writes(_repo) and _repo.branches["drafts"] == _start)
 check("the author is shown where on drafts it goes",
-      _look["chapter_path"] == "chapters/Chapter 7.md"
-      and _look["media_dir"] == "assets/Chapter 7" and _look["branch"] == "drafts"
+      _look["chapter_path"] == "chapters/chapter-07.md"
+      and _look["media_dir"] == "assets/chapter-07" and _look["branch"] == "drafts"
       and not _look["exists"] and not _look["refused"], _look)
 
 _sent = _with_service(_repo, lambda: _server.r_import_drafts_send(
@@ -2219,8 +2283,8 @@ check("only the drafts branch is moved, and never by force",
       and _repo.branches["main"] == _start, _moves)
 _after = _repo.files()
 check("the chapter and its picture are both in that one commit",
-      _after["chapters/Chapter 7.md"] == _res["text"].encode()
-      and _after["assets/Chapter 7/image1.png"] == _PNG1, sorted(_after))
+      _after["chapters/chapter-07.md"] == _res["text"].encode()
+      and _after["assets/chapter-07/image1.png"] == _PNG1, sorted(_after))
 _link = urllib.parse.unquote(re.search(r"!\[\]\(([^)]+)\)", _res["text"]).group(1))
 check("the picture is at the path the chapter links to",
       _posixpath.normpath(_posixpath.join("chapters", _link)) in _after, _link)
@@ -2228,14 +2292,14 @@ check("every other file on drafts is byte-identical",
       all(_after[p] == (d.encode() if isinstance(d, str) else d)
           for p, d in _DRAFTS_START.items()))
 check("the author is told where it went and given the commit",
-      _sent["chapter_path"] == "chapters/Chapter 7.md" and _sent["url"]
+      _sent["chapter_path"] == "chapters/chapter-07.md" and _sent["url"]
       and _sent["branch"] == "drafts", _sent)
 check("the Word import is still in the folder route's hands afterwards",
       _server.IMPORT["result"] is _res and os.path.isdir(_res["stage"]))
 _saved = _server.r_import_save(None, {})
 check("and the same chapter can still be saved into the vault (Publish reads it)",
-      os.path.isfile(os.path.join(_wch, "Chapter 7.md"))
-      and os.path.isfile(os.path.join(_wa, "assets", "Chapter 7", "image1.png")),
+      os.path.isfile(os.path.join(_wch, "chapter-07.md"))
+      and os.path.isfile(os.path.join(_wa, "assets", "chapter-07", "image1.png")),
       _saved)
 _again = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
 check("sending the same import again finds nothing to send",
@@ -2248,23 +2312,23 @@ from app import contents as _contents
 _SEED = ("---\nauthors:\n  - \"A\"\n---\n\n# Book\n\n## Contents\n\n"
          "- **[[chapters/chapter-01|Chapter 1 — One]]**\n  What it does.\n\n"
          "## Concept index\n\n- [[Example concept]]\n")
-_new, _why = _contents.add_line(_SEED, "chapters/Chapter 7.md", "Chapter 7: Seven")
+_new, _why = _contents.add_line(_SEED, "chapters/chapter-07.md", "Chapter 7: Seven")
 check("a new chapter's line goes after the last item under Contents",
       _new == _SEED.replace("  What it does.\n",
-                            "  What it does.\n- **[[chapters/Chapter 7|Chapter 7: Seven]]**\n"),
+                            "  What it does.\n- **[[chapters/chapter-07|Chapter 7: Seven]]**\n"),
       repr(_new))
 _old_lines = _SEED.splitlines(keepends=True)
 _new_lines = _new.splitlines(keepends=True)
 check("and it is the only line that changes",
       len(_new_lines) == len(_old_lines) + 1
       and [l for l in _new_lines if l not in _old_lines]
-      == ["- **[[chapters/Chapter 7|Chapter 7: Seven]]**\n"])
+      == ["- **[[chapters/chapter-07|Chapter 7: Seven]]**\n"])
 check("line endings are kept",
       _contents.add_line(_SEED.replace("\n", "\r\n"), "chapters/X.md", "X")[0]
-      == _new.replace("Chapter 7|Chapter 7: Seven", "X|X").replace("\n", "\r\n")
-      .replace("chapters/Chapter 7", "chapters/X"))
+      == _new.replace("chapters/chapter-07|Chapter 7: Seven", "chapters/X|X")
+      .replace("\n", "\r\n"))
 check("a chapter already listed is not listed twice",
-      _contents.add_line(_new, "chapters/Chapter 7.md", "Seven")[0] is None)
+      _contents.add_line(_new, "chapters/chapter-07.md", "Seven")[0] is None)
 check("no Contents heading: nothing is added, and the author is told",
       _contents.add_line("# Book\n\nText.\n", "chapters/X.md", "X")[0] is None
       and "no “Contents” heading" in _contents.add_line("# B\n", "chapters/X.md", "X")[1])
@@ -2276,14 +2340,14 @@ check("a | in the title can't break the link",
 check("the title is the chapter's first heading, else its file name",
       _contents.chapter_title("Intro\n# **Chapter 3**: Reality\n", "c.md")
       == "Chapter 3: Reality"
-      and _contents.chapter_title("No heading.", "Chapter 9.md") == "Chapter 9")
+      and _contents.chapter_title("No heading.", "chapter-09.md") == "chapter-09")
 
 _repo_ix = _GitRepo("example-org/book-a", dict(_DRAFTS_START, **{"index.md": _SEED}))
-_res = _converted(_wch, _wa, "Chapter 9.md", {})
+_res = _converted(_wch, _wa, "chapter-09.md", {})
 _look = _with_service(_repo_ix, lambda: _server.r_import_drafts_check(None, dict(_A)))
 check("a new chapter's check shows the front-page line it will add",
       (_look.get("contents") or {}).get("line")
-      == "- **[[chapters/Chapter 9|Chapter 9]]**", _look.get("contents"))
+      == "- **[[chapters/chapter-09|chapter-09]]**", _look.get("contents"))
 _sent = _with_service(_repo_ix, lambda: _server.r_import_drafts_send(
     None, dict(_A, head=_look["head"])))
 _after = _repo_ix.files()
@@ -2291,9 +2355,13 @@ check("and sends the chapter and that one line in the same commit",
       _sent["sent"] and _sent["contents"]
       and _after["index.md"].decode() == _SEED.replace(
           "  What it does.\n",
-          "  What it does.\n- **[[chapters/Chapter 9|Chapter 9]]**\n")
-      and "chapters/Chapter 9.md" in _after, _after.get("index.md"))
-_res = _converted(_wch, _wa, "Chapter 9.md", {})
+          "  What it does.\n- **[[chapters/chapter-09|chapter-09]]**\n")
+      and "chapters/chapter-09.md" in _after, _after.get("index.md"))
+check("and records in the same commit which Word file became that chapter",
+      _convert.parse_sources(_after.get("chapter-sources.json", b"").decode())
+      .get(_convert.source_key(_res["docx"])) == "chapters/chapter-09.md",
+      _after.get("chapter-sources.json"))
+_res = _converted(_wch, _wa, "chapter-09.md", {})
 _res["text"] = "# Chapter 9\n\nRevised in Word.\n"
 _before_ix = _repo_ix.files()["index.md"]
 _look = _with_service(_repo_ix, lambda: _server.r_import_drafts_check(None, dict(_A)))
@@ -2303,7 +2371,7 @@ _with_service(_repo_ix, lambda: _server.r_import_drafts_send(
     None, dict(_A, head=_look["head"], replace=True)))
 check("and the front page is byte-identical after the replacement",
       _repo_ix.files()["index.md"] == _before_ix)
-_res = _converted(_wch, _wa, "Chapter 10.md", {})
+_res = _converted(_wch, _wa, "chapter-10.md", {})
 _look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
 check("a book with no front page on drafts: the chapter still goes, with a note",
       (_look.get("contents") or {}).get("note") and not _look["refused"]
@@ -2323,7 +2391,7 @@ if _pandoc:
     os.remove(_png_src)
     _server.IMPORT.update(docx=_docx, folder=_wch, result=None)
     _real = _with_service(_repo, lambda: _server.r_import_convert(
-        None, {"name": "Chapter 11.md"}))
+        None, {"name": "chapter-11.md"}))
     _look = _with_service(_repo, lambda: _server.r_import_drafts_check(
         None, dict(_A)))
     _before = len([c for c in _repo.calls if c[1].endswith("/git/commits")])
@@ -2336,14 +2404,14 @@ if _pandoc:
     check("a real Word file with a picture makes one commit on drafts",
           len([c for c in _repo.calls if c[0] == "POST"
                and c[1].endswith("/git/commits")]) == _before + 1
-          and _after["chapters/Chapter 11.md"] == _real["text"].encode())
+          and _after["chapters/chapter-11.md"] == _real["text"].encode())
     check("with the picture at the path the converted chapter links to",
           _after.get(_pic) == _ONE_PIXEL_PNG, (_pic, sorted(_after)))
     os.remove(_docx)
 
 # --- drafts moved between looking and sending --------------------------------
 
-_res = _converted(_wch, _wa, "Chapter 8.md", {"image1.png": _PNG1})
+_res = _converted(_wch, _wa, "chapter-08.md", {"image1.png": _PNG1})
 _look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
 _repo.before_move = lambda: _repo.push("cms-user", {
     "chapters/chapter-01.md": "# One\n\nFixed in the browser.\nLeave me.\n"})
@@ -2358,7 +2426,7 @@ check("and their change is still what drafts holds",
       _repo.commits[_theirs]["who"] == "cms-user"
       and _repo.files()["chapters/chapter-01.md"]
       == b"# One\n\nFixed in the browser.\nLeave me.\n"
-      and "chapters/Chapter 8.md" not in _repo.files())
+      and "chapters/chapter-08.md" not in _repo.files())
 check("the refusal comes with a fresh offer, read from drafts as it is now",
       _moved["drafts"]["head"] == _theirs and _moved["drafts"]["head"]
       != _look["head"] and not _moved["drafts"]["refused"], _moved["drafts"])
@@ -2376,10 +2444,10 @@ check("sending again on the fresh offer goes on top of their change",
 
 # Someone puts a chapter of the same name on drafts in between: the fresh
 # offer says so, and replacing it needs its own tick.
-_res = _converted(_wch, _wa, "Chapter 9.md", {})
+_res = _converted(_wch, _wa, "chapter-09.md", {})
 _look = _with_service(_repo, lambda: _server.r_import_drafts_check(None, dict(_A)))
 _repo.before_move = lambda: _repo.push("cms-user", {
-    "chapters/Chapter 9.md": "# Nine, written in the browser\n"})
+    "chapters/chapter-09.md": "# Nine, written in the browser\n"})
 _moved = _with_service(_repo, lambda: _server.r_import_drafts_send(
     None, dict(_A, head=_look["head"])))
 check("a chapter of the same name appearing in between is shown on the new offer",
@@ -2391,17 +2459,17 @@ check("and it is not replaced without the author saying so",
           _repo, lambda: _server.r_import_drafts_send(
               None, dict(_A, head=_moved["drafts"]["head"])))) or "")
       and _repo.branches["drafts"] == _head
-      and _repo.files()["chapters/Chapter 9.md"]
+      and _repo.files()["chapters/chapter-09.md"]
       == b"# Nine, written in the browser\n")
 
 # --- bringing the same chapter in again --------------------------------------
 
 _repo2 = _GitRepo("example-org/book-a", {
-    "chapters/Chapter 5.md": "# Chapter 5\n\nOld paragraph.\n\nKept.\n",
-    "assets/Chapter 5/image1.png": _PNG1,
-    "assets/Chapter 5/image2.png": _PNG2,
+    "chapters/chapter-05.md": "# Chapter 5\n\nOld paragraph.\n\nKept.\n",
+    "assets/chapter-05/image1.png": _PNG1,
+    "assets/chapter-05/image2.png": _PNG2,
 })
-_res = _converted(_wch, _wa, "Chapter 5.md", {"image1.png": _PNG1})
+_res = _converted(_wch, _wa, "chapter-05.md", {"image1.png": _PNG1})
 _look = _with_service(_repo2, lambda: _server.r_import_drafts_check(None, dict(_A)))
 check("bringing a chapter in again says it replaces the one on drafts",
       _look["exists"] and _look["changed_lines"]["removed"] >= 1
@@ -2412,8 +2480,8 @@ _sent = _with_service(_repo2, lambda: _server.r_import_drafts_send(
     None, dict(_A, head=_look["head"], replace=True)))
 _after = _repo2.files()
 check("a picture removed since the last import is gone from drafts",
-      "assets/Chapter 5/image2.png" not in _after
-      and _after["assets/Chapter 5/image1.png"] == _PNG1 and _sent["removed"] == 1,
+      "assets/chapter-05/image2.png" not in _after
+      and _after["assets/chapter-05/image1.png"] == _PNG1 and _sent["removed"] == 1,
       sorted(_after))
 check("an unchanged picture isn't uploaded again",
       not any(c[1].endswith("/git/blobs") and base64.b64decode(
@@ -2421,8 +2489,8 @@ check("an unchanged picture isn't uploaded again",
 
 # A pictures folder on drafts with no chapter of that name belongs to something
 # else, and is never written into.
-_repo3 = _GitRepo("example-org/book-a", {"assets/Chapter 6/image1.png": _PNG2})
-_res = _converted(_wch, _wa, "Chapter 6.md", {"image1.png": _PNG1})
+_repo3 = _GitRepo("example-org/book-a", {"assets/chapter-06/image1.png": _PNG2})
+_res = _converted(_wch, _wa, "chapter-06.md", {"image1.png": _PNG1})
 _look = _with_service(_repo3, lambda: _server.r_import_drafts_check(None, dict(_A)))
 check("a pictures folder on drafts that belongs to something else is refused",
       _look["refused"] and "belong to something else" in _look["refused"], _look)
@@ -2433,7 +2501,7 @@ check("and sending anyway writes nothing",
 # --- one book's text never goes to another book's repository -----------------
 
 _repo4 = _GitRepo("example-org/book-a", {})
-_res = _converted(_wch, _wa, "Chapter 10.md", {})
+_res = _converted(_wch, _wa, "chapter-10.md", {})
 _look = _with_service(_repo4, lambda: _server.r_import_drafts_check(None, dict(_A)))
 _wb, _wbch = _word_vault("book-b", "https://github.com/example-org/book-b.git")
 _server.CONSOLE["access"]["book-b"] = "write"
@@ -2722,12 +2790,12 @@ check("a book laid out for the website lists only its pages as chapters",
        "content/index.md"], _two.chapters())
 _one = _session_mod.DraftsSession("book-a", {"head": "h", "tree": "t", "files": {
     p: "s" for p in ("README.md", "CONTRIBUTING.md", "QA.md", "LICENSE",
-                     "chapters/Chapter 1.md", "chapters/Definitions/Agency.md",
+                     "chapters/chapter-01.md", "chapters/Definitions/Agency.md",
                      "chapters/readme.md", ".github/PULL_REQUEST.md")}},
     lambda sha: b"")
 check("a book kept as a vault lists its pages, not the files about the repository",
       [c["path"] for c in _one.chapters()] ==
-      ["QA.md", "chapters/Chapter 1.md", "chapters/Definitions/Agency.md"],
+      ["QA.md", "chapters/chapter-01.md", "chapters/Definitions/Agency.md"],
       _one.chapters())
 
 
