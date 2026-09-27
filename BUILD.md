@@ -508,7 +508,7 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 525 checks: the analyses, the file-safety promises,
+python3 -m tests.test_all     # 560 checks: the analyses, the file-safety promises,
                               #             the Word conversion, the console's
                               #             refusal rules, the path from accepting
                               #             a change to the live book, the
@@ -519,11 +519,13 @@ python3 -m tests.test_all     # 525 checks: the analyses, the file-safety promis
                               #             only with a link to the commit, the
                               #             version check between the page and the
                               #             running app, the drafts preview's
-                              #             states, and the words the
+                              #             states, the AI formatting check (its
+                              #             rules file, the wording guard, no key,
+                              #             a failed network), and the words the
                               #             troubleshooting guide quotes
-node tests/ui_flow.js         # 162 checks: the review, drafts, import,
-                              #            book-choosing, drafts preview and
-                              #            going-live flows,
+node tests/ui_flow.js         # 173 checks: the review, drafts, import,
+                              #            book-choosing, drafts preview,
+                              #            formatting-check and going-live flows,
                               #            driven against the real app.js
 ```
 
