@@ -241,12 +241,13 @@ def edit_entries(snap, changed):
     return entries
 
 
-def read(token, book, chapter_path, media_dir, index=None):
+def read(token, book, chapter_path, media_dir, index=None, sources=None):
     """What drafts holds now where this chapter is going.
 
     Returns a state dict, or a Problem. `refused` is set, in the author's
     words, when the chapter must not be sent there at all. With `index` (the
-    front page's path), `index_sha` is its blob in this same listing, or None.
+    front page's path), `index_sha` is its blob in this same listing, or None;
+    with `sources` (chapter-sources.json's path), `sources_sha` likewise.
     """
     listing = _listing(token, book)
     if isinstance(listing, github.Problem):
@@ -259,6 +260,10 @@ def read(token, book, chapter_path, media_dir, index=None):
     front = files.get(index) if index else None
     if front is not None and front.get("type") == "blob":
         state["index_sha"] = front.get("sha")
+    state["sources_sha"] = None
+    known = files.get(sources) if sources else None
+    if known is not None and known.get("type") == "blob":
+        state["sources_sha"] = known.get("sha")
     chapter = files.get(chapter_path)
     if chapter is not None and chapter.get("type") != "blob":
         state["refused"] = (

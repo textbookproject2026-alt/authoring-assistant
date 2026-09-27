@@ -183,6 +183,25 @@ account**, and you can still save the chapter into your vault.
   is there now, and you press **Send to drafts** again. It never writes over
   anyone else's work.
 
+### What the chapter is called
+
+Every book on the platform names its chapters `chapter-01.md`, `chapter-02.md`
+and so on, with the pictures in `assets/chapter-01/` and so on. In a book's
+`chapters` folder the tool suggests the right name for you:
+
+- **A Word file the book hasn't seen** becomes the next free number.
+- **The same Word file again** becomes the chapter it became last time, so
+  bringing it in again replaces that chapter. The book remembers which Word file
+  became which chapter in `chapter-sources.json`, at the top of the book. Saving
+  the chapter into your folder updates it there, and **Send to drafts** sends it
+  in the same commit as the chapter.
+- **A chapter named before this rule** (a book that went live with other names)
+  keeps its name: its web address is live. The tool finds it by the Word file's
+  name and replaces it.
+
+A new chapter can't be given any other name in `chapters`. Concept pages, in
+`chapters/Definitions`, keep their own names: the name is the link.
+
 ### What to expect
 
 Word can hold things that a chapter file cannot, so some parts come across better

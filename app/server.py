@@ -569,6 +569,29 @@ def _chapters_in(folder):
                if n.lower().endswith((".md", ".markdown")))
 
 
+def _naming(folder):
+    """(book root, file names there, chapter-sources) when `folder` is a book's
+    chapters folder, where the one naming rule applies (convert.chapter_name).
+    None anywhere else: a concept page in chapters/Definitions keeps its name."""
+    if not folder or not os.path.isdir(folder):
+        return None
+    root = convert.find_vault_root(folder)
+    if root is None or os.path.abspath(folder) != os.path.abspath(
+            os.path.join(root, CHAPTERS_FOLDER)):
+        return None
+    return root, os.listdir(folder), convert.read_sources(root)
+
+
+def _suggestion(docx, folder):
+    """{"suggested_name", "suggested_how"} for this Word file going to `folder`."""
+    naming = _naming(folder)
+    if naming is None:
+        return {"suggested_name": convert.suggest_name(docx), "suggested_how": None}
+    _, existing, sources = naming
+    name, how = convert.chapter_name(docx, existing, sources, CHAPTERS_FOLDER)
+    return {"suggested_name": name, "suggested_how": how}
+
+
 def r_import_status(handler, data):
     """Whether this Mac can read Word documents at all, and where the chapter
     will go: the open vault's chapters folder, until the author picks another.
@@ -620,7 +643,7 @@ def r_import_pick_docx(handler, data):
     IMPORT["docx"] = path
     return {"docx": path,
             "docx_name": os.path.basename(path),
-            "suggested_name": convert.suggest_name(path),
+            **_suggestion(path, IMPORT["folder"] or _chapters_folder()),
             "size": os.path.getsize(path)}
 
 
@@ -649,7 +672,9 @@ def r_import_pick_folder(handler, data):
             "chapters_here": _chapters_in(folder),
             # The top of the vault is a folder an author can pick by mistake:
             # it opens there, and chapters don't belong there.
-            "at_top": os.path.abspath(folder) == os.path.abspath(top)}
+            "at_top": os.path.abspath(folder) == os.path.abspath(top),
+            # The name follows the folder: chapter-NN only in chapters/.
+            **(_suggestion(IMPORT["docx"], folder) if IMPORT["docx"] else {})}
 
 
 def r_import_convert(handler, data):
@@ -668,6 +693,11 @@ def r_import_convert(handler, data):
     problem = convert.name_problem(name)
     if problem:
         raise KeyError(problem)
+    naming = _naming(IMPORT["folder"])
+    if naming is not None:
+        problem = convert.rule_problem(name, naming[1])
+        if problem:
+            raise KeyError(problem)
     # What stops it being saved into the folder (a chapter of that name is
     # already there, say) doesn't stop it going to the drafts area, where it
     # replaces the chapter in a commit that can be looked back at. Only when
@@ -716,7 +746,12 @@ def r_import_save(handler, data):
         os.path.join(IMPORT["folder"], os.path.basename(result["md_name"])),
         result.get("media_target"),
     )
+    naming = _naming(IMPORT["folder"])
+    if naming is not None:
+        _guard_vault_write(os.path.join(naming[0], convert.SOURCES_FILE))
     chapter_path, media_path = convert.save(result, IMPORT["folder"])
+    if naming is not None:
+        _record_source(naming[0], result)
     # Kept, not cleared away: the same chapter can still be sent to the
     # drafts area. It goes when another import starts, or on cancel or quit.
     result["saved"] = chapter_path
@@ -728,6 +763,21 @@ def r_import_save(handler, data):
         "media_name": media_rel,
         "folder": IMPORT["folder"],
     }
+
+
+def _record_source(root, result):
+    """Remember in the book that this Word file became this chapter."""
+    path = os.path.join(root, convert.SOURCES_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            old = fh.read()
+    except OSError:
+        old = ""
+    text = convert.sources_text(old, result["docx"], f"{CHAPTERS_FOLDER}/"
+                                + os.path.basename(result["md_name"]))
+    if text != old:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
 
 
 def r_import_cancel(handler, data):
@@ -835,13 +885,24 @@ def _drafts_plan(token, book, result):
                        "folder, so it can't be sent. Nothing was sent.")
     chapter_path, media_dir = paths
     index = drafts.index_path(result["vault"], IMPORT["folder"])
-    state = _unwrap(drafts.read(token, book, chapter_path, media_dir, index))
+    naming = _naming(IMPORT["folder"])
+    sources = None
+    if naming is not None:
+        sources = os.path.relpath(os.path.join(naming[0], convert.SOURCES_FILE),
+                                  os.path.abspath(result["vault"])).replace(os.sep, "/")
+    state = _unwrap(drafts.read(token, book, chapter_path, media_dir, index,
+                                sources=sources))
     entries = []
     if not state["refused"]:
         entries = drafts.build_tree(chapter_path,
                                     result["text"].encode("utf-8"), media_dir,
                                     drafts.pictures(result),
                                     state["on_drafts"])
+    if entries and sources and not state["refused"]:
+        entry = _sources_entry(token, book, state, sources, result["docx"],
+                               chapter_path)
+        if entry:
+            entries.append(entry)
     front = None
     if entries and not state["refused"] and not state["exists"]:
         front = _contents_entry(token, book, state, index, chapter_path,
@@ -855,6 +916,25 @@ def _drafts_plan(token, book, result):
     shown["contents"] = front
     shown["head"] = state["head"]
     return shown
+
+
+def _sources_entry(token, book, state, path, docx, chapter_path):
+    """chapter-sources.json on drafts with this Word file recorded as
+    `chapter_path`, as a tree entry; None when drafts already says so. Read
+    from the same listing as the chapter, so the commit is of one drafts area."""
+    old = ""
+    if state.get("sources_sha"):
+        data = github.blob_bytes(token, book, state["sources_sha"])
+        if isinstance(data, github.Problem):
+            return None     # left as it is: the chapter still goes
+        old = drafts.text_of(data) or ""
+    top = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+    rel = chapter_path[len(top):] if top and chapter_path.startswith(top) else chapter_path
+    text = convert.sources_text(old, docx, rel)
+    if text == old:
+        return None
+    data = text.encode("utf-8")
+    return {"path": path, "sha": drafts.blob_sha(data), "data": data}
 
 
 def _contents_entry(token, book, state, index, chapter_path, text, md_name):

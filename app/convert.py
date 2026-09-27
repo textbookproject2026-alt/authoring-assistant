@@ -20,11 +20,13 @@ Four rules shape everything here.
 """
 
 import glob
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -260,6 +262,114 @@ def suggest_name(docx_path):
     base = re.sub(r'[/\\:*?"<>|]', "-", base)
     base = re.sub(r"\s+", " ", base).strip()
     return (base or "Untitled chapter") + ".md"
+
+
+# --- the one chapter-naming rule ---------------------------------------------
+#
+# Every book names a chapter `chapters/chapter-NN.md`, with its pictures in
+# `assets/chapter-NN/` (decided 27 Sep 2026). A live book keeps the names it
+# already has: its addresses are live. So a Word file becomes the next free
+# chapter-NN the first time, and the book remembers which chapter it became, in
+# `chapter-sources.json` at the top of the book, so that bringing the same Word
+# file in again replaces that same chapter. book-requests writes the same file
+# when it makes a book from a manuscript, and follows the same rule.
+
+SOURCES_FILE = "chapter-sources.json"
+CHAPTER_RE = re.compile(r"chapter-(\d+)\.md")
+SOURCES_NOTE = ("Which chapter each Word file became, so bringing the same file in "
+                "again replaces the same chapter. Written by the Authoring "
+                "Assistant and book-requests; keys are Word file names.")
+
+
+def source_key(word_name):
+    """A Word file's name as the book remembers it: the name alone, however it
+    was typed or copied (Unicode, case and spacing don't count)."""
+    base = os.path.basename(word_name or "")
+    base = unicodedata.normalize("NFC", base)
+    return re.sub(r"\s+", " ", base).strip().casefold()
+
+
+def read_sources(root):
+    """{source key: chapter path} from the book at `root`. {} when there's no
+    such file, or it isn't the shape this writes (a broken file is never a
+    reason to refuse an import: the chapter just isn't matched)."""
+    try:
+        with open(os.path.join(root, SOURCES_FILE), encoding="utf-8") as fh:
+            return parse_sources(fh.read())
+    except OSError:
+        return {}
+
+
+def parse_sources(text):
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {}
+    chapters = data.get("chapters") if isinstance(data, dict) else None
+    if not isinstance(chapters, dict):
+        return {}
+    return {source_key(k): v for k, v in chapters.items()
+            if isinstance(k, str) and isinstance(v, str)}
+
+
+def sources_text(old_text, word_name, chapter_path):
+    """The book's chapter-sources.json with this Word file recorded as
+    `chapter_path`, keeping every other entry as it was. Returns the text."""
+    try:
+        data = json.loads(old_text) if old_text else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    chapters = data.get("chapters") if isinstance(data.get("chapters"), dict) else {}
+    key = source_key(word_name)
+    chapters = {k: v for k, v in chapters.items() if source_key(k) != key}
+    chapters[os.path.basename(word_name)] = chapter_path
+    out = {"_note": SOURCES_NOTE,
+           "chapters": dict(sorted(chapters.items(), key=lambda kv: kv[1]))}
+    return json.dumps(out, indent=2, ensure_ascii=False) + "\n"
+
+
+def _legacy_names(word_name):
+    """The names a chapter from this Word file had before the rule: the app's
+    old suggestion (the Word file's own name) and book-requests' slug of it."""
+    stem = suggest_name(word_name)[:-3]
+    slug = unicodedata.normalize("NFKD", stem.lower())
+    slug = "".join(c for c in slug if not unicodedata.combining(c))
+    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")[:60] or "chapter"
+    return [stem + ".md", slug + ".md"]
+
+
+def chapter_name(word_name, existing, sources, folder_rel="chapters"):
+    """(file name, how) for a Word file going into the book's chapters folder.
+
+    `existing` holds the names of the files there now, `sources` is
+    read_sources(). `how` says why, for the author:
+      "recorded"  this Word file became that chapter last time
+      "existing"  a chapter already has this Word file's pre-rule name
+                  (a live book keeps its names)
+      "new"       the next free chapter-NN
+    """
+    existing = set(existing)
+    recorded = sources.get(source_key(word_name))
+    if recorded and recorded.startswith(folder_rel + "/") and "/" not in recorded[len(folder_rel) + 1:]:
+        return recorded[len(folder_rel) + 1:], "recorded"
+    for name in _legacy_names(word_name):
+        if name in existing:
+            return name, "existing"
+    taken = [int(m.group(1)) for n in existing | {os.path.basename(v) for v in sources.values()}
+             for m in [CHAPTER_RE.fullmatch(n)] if m]
+    return f"chapter-{max(taken, default=0) + 1:02d}.md", "new"
+
+
+def rule_problem(md_name, existing):
+    """Why a chapter can't have this name in the chapters folder, or None. A new
+    chapter is chapter-NN.md; an existing file may be replaced whatever its name."""
+    if md_name in set(existing) or CHAPTER_RE.fullmatch(md_name):
+        return None
+    return ("A new chapter is named chapter-NN.md, with the next free number "
+            "(chapter-04.md, say): every book on the platform names its chapters "
+            "that way. The suggested name already follows it.")
 
 
 def _slug(md_name):

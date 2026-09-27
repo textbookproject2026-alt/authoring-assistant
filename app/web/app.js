@@ -685,14 +685,32 @@ function checkImportReady() {
 }
 document.getElementById('import-name').oninput = checkImportReady;
 
+// The suggested name follows the Word file and the folder (chapter-NN in a
+// book's chapters folder). It replaces the box only while the author hasn't
+// typed a name of their own.
+const NAME_HOW = {
+  recorded: 'This Word file became this chapter last time, so bringing it in again replaces it.',
+  existing: 'A chapter already has this Word file\'s name, so bringing it in again replaces it.',
+  new: 'The next free chapter number.',
+};
+function applySuggestion(r) {
+  if (!r || !r.suggested_name) return;
+  const nameBox = document.getElementById('import-name');
+  const typed = nameBox.value.trim();
+  if (!typed || typed === W.suggested) {
+    nameBox.value = r.suggested_name;
+    document.getElementById('name-how').textContent = NAME_HOW[r.suggested_how] || '';
+  }
+  W.suggested = r.suggested_name;
+}
+
 document.getElementById('choose-docx').onclick = async () => {
   try {
     const r = await api('/api/import/pick-docx', {});
     if (r.cancelled) return;
     if (r.error) return fail(r.error);
     W.docx = r;
-    const nameBox = document.getElementById('import-name');
-    if (!nameBox.value.trim()) nameBox.value = r.suggested_name;
+    applySuggestion(r);
     renderImportStep();
   } catch (e) { fail(e.message); }
 };
@@ -704,6 +722,7 @@ document.getElementById('choose-import-folder').onclick = async () => {
     if (r.error) return fail(r.error);
     await refreshWorkspace();
     W.folder = r;
+    applySuggestion(r);
     refreshDraftsStatus();
     document.getElementById('folder-chosen').textContent = describeFolder(r);
     checkImportReady();
@@ -989,6 +1008,8 @@ document.getElementById('import-another').onclick = () => {
   W.docx = null;
   W.saved = null; W.sent = null; W.drafts = null; W.converted = null;                  // the folder is kept: it is usually the same one
   document.getElementById('import-name').value = '';
+  document.getElementById('name-how').textContent = '';
+  W.suggested = null;
   renderImportStep();
   show('step-import');
 };
