@@ -508,7 +508,7 @@ own branch as `backup-annotations.yml` already does. **Still to be decided.**
 ## Tests
 
 ```sh
-python3 -m tests.test_all     # 509 checks: the analyses, the file-safety promises,
+python3 -m tests.test_all     # 525 checks: the analyses, the file-safety promises,
                               #             the Word conversion, the console's
                               #             refusal rules, the path from accepting
                               #             a change to the live book, the
