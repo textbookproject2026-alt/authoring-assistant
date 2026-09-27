@@ -15,7 +15,7 @@ import re
 import time
 
 from . import glossary as glossary_mod
-from . import llm, picker, references, terms
+from . import formatting, llm, picker, references, terms
 from .edits import Edit, apply_edits, line_diff
 from .mdmap import DocMap, sha256
 
@@ -307,14 +307,32 @@ class Session:
                 notes.append("No glossary terms stood out in this chapter.")
             findings += f
 
+        if "format" in chosen:
+            f, n = formatting.check(self.docmap, self.known_pages())
+            findings += f
+            notes += n
+
         # Stable ids and a sensible order: through the chapter, top to bottom.
-        rank = {"reference": 0, "term": 1, "glossary": 2}
+        rank = {"reference": 0, "term": 1, "glossary": 2, "format": 3}
         findings.sort(key=lambda f: (rank[f["kind"]], f["line"], f["start"]))
         for i, f in enumerate(findings):
             f["id"] = f"{f['kind'][0]}{i}"
         self.findings = findings
         self.notes = notes
         return findings, notes
+
+    def known_pages(self):
+        """The exact names a [[link]] in this chapter may point at: the concept
+        pages and the chapters (formatting.guard checks new link targets)."""
+        names = {p["title"] for p in self.pages}
+        try:
+            names |= {c["name"] for c in self.chapters()}
+        except (OSError, KeyError, TypeError):
+            pass
+        if self.chapter_path:
+            names.add(re.sub(r"\.md$", "", self.chapter_path.replace("\\", "/")
+                             .rsplit("/", 1)[-1]))
+        return names
 
     # -- turning decisions into a finished file --------------------------------
 
@@ -324,7 +342,7 @@ class Session:
 
         edits, used_groups = [], set()
         for f in accepted:
-            if f["kind"] == "glossary":
+            if f["kind"] in ("glossary", "format"):
                 continue
             edits.append(Edit(f["line"], f["start"], f["end"],
                               f["replacement"], f["id"]))
@@ -358,6 +376,21 @@ class Session:
         for group in used_groups:
             if group in self.anchor_edits:
                 edits.append(self.anchor_edits[group])
+
+        # Formatting fixes replace a whole line, so they go last and only onto
+        # lines no other accepted change touches. One that would collide is
+        # left out, and the preview says so: run the check again after saving.
+        self.format_skipped = []
+        touched = {e.line for e in edits}
+        for f in accepted:
+            if f["kind"] != "format":
+                continue
+            if f["line"] in touched:
+                self.format_skipped.append(f["line_no"])
+                continue
+            touched.add(f["line"])
+            edits.append(Edit(f["line"], f["start"], f["end"],
+                              f["replacement"], f["id"]))
         return edits, accepted
 
     def build_preview(self, accepted_ids, expand_groups):
@@ -399,7 +432,10 @@ class Session:
                 "terms": sum(1 for f in accepted if f["kind"] == "term"),
                 "glossary": len(gloss_terms),
                 "expanded": len(expand_groups or []),
+                "format": sum(1 for f in accepted if f["kind"] == "format")
+                - len(self.format_skipped),
             },
+            "format_skipped": list(self.format_skipped),
         }
 
     def commit(self, accepted_ids, expand_groups):

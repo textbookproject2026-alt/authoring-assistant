@@ -41,6 +41,7 @@ const steps = ['step-choose','step-chapter','step-options','step-working','step-
 steps.forEach(s => els[s].classList.add('step'));
 
 const groupSpans = [mkEl('grp1'), mkEl('grp2')];
+const nounSpans = [mkEl('noun1'), mkEl('noun2')];
 const secondary = mkEl('secondary'); secondary.style = {};
 const warnbox = mkEl('warnbox');
 const previewH2 = mkEl('previewh2');
@@ -63,6 +64,7 @@ const document = {
   querySelectorAll: sel => {
     if (sel === '.step') return steps.map(s => els[s]);
     if (sel === '.grp') return groupSpans;
+    if (sel === '.grp-noun') return nounSpans;
     if (sel === '.tab') return [];
     if (sel === '[data-back]') return [];
     return [];
@@ -112,6 +114,8 @@ let CURRENT_WS = WS_NONE;
 const bodies = {};
 
 let lastPreviewBody = null;
+let analyseReply = null;   // in place of the three findings, when set
+let previewExtra = {};     // merged into the preview reply
 let lastConvertBody = null;
 // What the fake server says about sending to the drafts area. Changed as the
 // run goes on: no push rights first, then an author who can push.
@@ -181,7 +185,7 @@ const fetch = async (route, opts) => {
     '/api/test-key': { ok: true, message: 'The key works. DeepSeek answered normally.' },
     '/api/clear-key': { cleared: true, deepseek: false },
     '/api/quit': { stopping: true },
-    '/api/analyse': { findings: FINDINGS, notes: ['A note for the author.'] },
+    '/api/analyse': analyseReply || { findings: FINDINGS, notes: ['A note for the author.'] },
 
     '/api/import/status': IMPORT_READY,
     '/api/import/pick-docx': {
@@ -297,7 +301,7 @@ const fetch = async (route, opts) => {
       diff: [{ line_no: 5, before: 'a', after: 'b' }],
       new_text: 'whole file', glossary_path: '/v/glossary.md', glossary_exists: false,
       glossary_added: ['morphogenesis'], glossary_after: '# Glossary\n\n## morphogenesis\n\nStructural elaboration.\n',
-      changed_lines: [4],
+      changed_lines: [4], ...previewExtra,
     }; })(),
   }[route] || {};
   if (reply && reply.__refuse) {
@@ -340,6 +344,13 @@ function check(name, cond, got) {
         calls.some(c => c.startsWith('/api/ping')), calls);
   check('DeepSeek is offered but switched off when no key is saved',
         els['opt-deepseek'].disabled === true, els['opt-deepseek'].disabled);
+  check('the AI formatting check is switched off when no key is saved',
+        els['opt-format'].disabled === true && els['opt-format'].checked === false,
+        els['opt-format'].disabled);
+  check('and it says it needs a DeepSeek key, and that everything else works',
+        els['format-state'].textContent.includes('needs a DeepSeek key')
+        && els['format-state'].textContent.includes('Everything else works'),
+        els['format-state'].textContent);
 
   // settings panel
   await ctx.document.getElementById('open-settings').onclick();
@@ -1241,6 +1252,64 @@ function check(name, cond, got) {
   check('and it stops checking in',
         calls.filter(c => c.startsWith('/api/ping')).length === pingsAfter);
   pingDown = false;
+
+  // --- the AI formatting check -------------------------------------------------
+  // With a key, the check is one more tick box. Its findings go through the same
+  // review: the whole line before and after, and "yes to every fix under this
+  // rule" for a rule with more than one.
+
+  const FORMAT = [
+    { id: 'f0', kind: 'format', group: 'format::LIST-1', group_label: 'LIST-1 (Lists)',
+      line_no: 11, before: '', match: '• A point', after: '', becomes: '- A point',
+      occurrence: 1, occurrence_total: 2, title: 'Formatting: lists, line 11',
+      explain: 'A bullet. Rule LIST-1.', detail_label: 'The rule', detail: 'Bullets are - .' },
+    { id: 'f1', kind: 'format', group: 'format::LIST-1', group_label: 'LIST-1 (Lists)',
+      line_no: 12, before: '', match: '• Another', after: '', becomes: '- Another',
+      occurrence: 2, occurrence_total: 2, title: 'Formatting: lists, line 12',
+      explain: 'A bullet. Rule LIST-1.', detail_label: 'The rule', detail: 'Bullets are - .' },
+  ];
+  analyseReply = { findings: FORMAT, notes: [
+    'A proposed formatting change to line 15 was thrown away because it would change your wording: “a” → “b”.'] };
+  previewExtra = { counts: { references: 0, terms: 0, glossary: 0, expanded: 0, format: 2 },
+                   format_skipped: [7], glossary_added: [] };
+  els['opt-references'].checked = false;
+  els['opt-terms'].checked = false;
+  els['opt-glossary'].checked = false;
+  els['opt-format'].disabled = false;
+  els['opt-format'].checked = true;
+  await els['start-analysis'].onclick();
+  await new Promise(r => setTimeout(r, 20));
+  check('ticking the formatting check asks for it, on its own',
+        JSON.stringify(bodies['/api/analyse'].analyses) === '["format"]',
+        bodies['/api/analyse'].analyses);
+  check('a formatting fix shows the whole line as it is',
+        els['sentence-before'].innerHTML.includes('<mark>• A point</mark>'),
+        els['sentence-before'].innerHTML);
+  check('and the whole line as it would be',
+        els['sentence-after'].innerHTML.includes('- A point'),
+        els['sentence-after'].innerHTML);
+  check('a formatting fix counts fixes under its rule, not mentions',
+        els['finding-explain'].textContent.includes('fix 1 of 2 under this rule'),
+        els['finding-explain'].textContent);
+  check('"yes to all" is offered as every fix under the rule',
+        nounSpans[0].textContent === 'formatting fix under rule'
+        && groupSpans[0].textContent === 'LIST-1 (Lists)' && secondary.style.display === '',
+        [nounSpans[0].textContent, groupSpans[0].textContent, secondary.style.display]);
+  els['ans-yes-all'].onclick();
+  await new Promise(r => setTimeout(r, 30));
+  check('yes to every fix under the rule accepts both',
+        lastPreviewBody && JSON.stringify(lastPreviewBody.accepted.sort()) === '["f0","f1"]',
+        lastPreviewBody && lastPreviewBody.accepted);
+  check('the preview names the formatting fixes',
+        els['preview-summary'].textContent.includes('2 formatting fixes'),
+        els['preview-summary'].textContent);
+  const noteTexts = els['notes-list'].children.map(c => c.textContent);
+  check('a proposal thrown away for changing the wording is shown to the author',
+        noteTexts.some(t => t.includes('change your wording')), noteTexts);
+  check('a fix left out because of another change on its line is shown too',
+        noteTexts.some(t => t.includes('line 7 was left out')), noteTexts);
+  analyseReply = null;
+  previewExtra = {};
 
   const failed = results.filter(r => !r[1]);
   console.log(`\n  ${results.length - failed.length} passed, ${failed.length} failed`);

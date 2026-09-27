@@ -3857,6 +3857,335 @@ check("every word the troubleshooting guide quotes is still in the app",
       + "\n         ".join(_gone))
 shutil.rmtree(_vault, ignore_errors=True)
 
+# ---------------------------------------------------------------------------
+# The AI formatting check (formatting.py; the knowledge base is
+# app/formatting_rules.md). DeepSeek itself is never called: every test gives
+# the check its answer, or fails the network on purpose.
+# ---------------------------------------------------------------------------
+
+import urllib.error as _urlerr
+from app import formatting, llm as _llm
+
+# --- the rules file is the knowledge base, and the prompt is built from it ---
+
+_rules = formatting.load_rules()
+check("formatting: the rules file has a version line",
+      _rules["version"].startswith("1"), _rules["version"])
+check("formatting: the rules are read by their IDs",
+      {"HEAD-1", "HEAD-4", "EMPH-1", "LIST-1", "TABLE-1", "NOTE-1", "CITE-1",
+       "CALL-1", "LINK-1", "IMG-1", "FILE-4"} <= set(_rules["rules"]),
+      sorted(_rules["rules"]))
+check("formatting: a rule's wrapped lines are part of the rule",
+      "graph" in _rules["rules"]["HEAD-1"]["text"], _rules["rules"]["HEAD-1"])
+_prompt = formatting.build_prompt(_rules)
+check("formatting: the prompt carries the rules file word for word",
+      _rules["text"] in _prompt)
+check("formatting: the prompt says formatting only, never wording",
+      "never change, add, remove or reorder a single word" in _prompt)
+_rules_dir = tempfile.mkdtemp(prefix="aa-rules-")
+_rules7 = os.path.join(_rules_dir, "rules.md")
+with open(_rules7, "w", encoding="utf-8") as fh:
+    fh.write("# Rules\n\nVersion: 7 (test)\n\n## Odd\n\n"
+             "- `ODD-1` Every line ends with a flourish.\n")
+_r7 = formatting.load_rules(_rules7)
+check("formatting: a changed rules file changes the prompt, with no code change",
+      _r7["version"] == "7 (test)" and "ODD-1" in formatting.build_prompt(_r7)
+      and "HEAD-1" not in formatting.build_prompt(_r7), _r7)
+check("formatting: the rules file sits in app/, so the build bundles it",
+      os.path.basename(os.path.dirname(formatting.RULES_PATH)) == "app"
+      and os.path.isfile(formatting.RULES_PATH))
+
+# --- the wording guard --------------------------------------------------------
+
+_known = {"Emergence", "Monism", "chapter-04"}
+_ok = [
+    ("**Introduction**", "## Introduction"),
+    ("#Chapter 9: Formatting", "# Chapter 9: Formatting"),
+    ("• A bulleted point", "- A bulleted point"),
+    ("> [!Tip] Remember", "> [!tip] Remember"),
+    ("Structures matter. [^3]", "Structures matter.[^3]"),
+    ("[underlined]{.underline} text", "underlined text"),
+    ("[]{#_Toc123}Methods", "Methods"),
+    ("See [[emergence]] here.", "See [[Emergence|emergence]] here."),
+    ("## **Methods**", "## Methods"),
+    ("| a | b |", "|a|b|"),
+]
+_bad = [
+    ("The cat sat.", "The **big** cat sat.", "wording"),
+    ("The cat sat.", "The cat sat!", "wording"),
+    ('He said "yes".', "He said “yes”.", "wording"),
+    ("See [the site](https://a.example).", "See [the site](https://b.example).",
+     "web address"),
+    ("A claim.[^1]", "A claim.[^2]", "footnote"),
+    ("Archer, M. (1995). *Realist social theory*. ^ref-archer-1995",
+     "Archer, M. (1995). *Realist social theory*.", "reference marker"),
+    ("See [[Emergence]].", "See Emergence.", "concept link"),
+    ("See Emergence.", "See [[Emergence]].", "concept link"),
+    ("See [[emergence]].", "See [[Emergenze|emergence]].", "isn't a page"),
+    ("One line.", "One\nline.", "split"),
+]
+check("formatting: the guard lets formatting-only changes through",
+      all(formatting.guard(b, a, _known) is None for b, a in _ok),
+      [(b, a, formatting.guard(b, a, _known)) for b, a in _ok
+       if formatting.guard(b, a, _known)])
+check("formatting: the guard stops every change that alters the text",
+      all(want in (formatting.guard(b, a, _known) or "") for b, a, want in _bad),
+      [(b, a, formatting.guard(b, a, _known)) for b, a, want in _bad
+       if want not in (formatting.guard(b, a, _known) or "")])
+
+# --- the whole flow: proposals, review, preview, save ------------------------
+
+FMT_CHAPTER = """---
+tags: [method]
+---
+
+#Chapter 9: Formatting
+
+**Introduction**
+
+Structures shape action.[^1] See [[emergence]] and [the site](https://example.com).
+
+• A bulleted point
+• Another point
+
+> [!Tip] Remember
+> Keep it simple.
+
+```text
+**not touched**
+```
+
+Monism is *one* idea.
+
+[^1]: A note.
+"""
+
+
+def _proposal(line, before, after, rule, why="A fix."):
+    return {"line": line, "before": before, "after": after, "rule": rule, "why": why}
+
+
+FMT_ANSWER = {
+    "changes": [
+        _proposal(5, "#Chapter 9: Formatting", "# Chapter 9: Formatting", "HEAD-3"),
+        _proposal(7, "**Introduction**", "## Introduction", "HEAD-4"),
+        _proposal(9, "Structures shape action.[^1] See [[emergence]] and [the site](https://example.com).",
+                  "Structures shape action.[^1] See [[Emergence|emergence]] and [the site](https://example.com).",
+                  "LINK-1"),
+        _proposal(11, "• A bulleted point", "- A bulleted point", "LIST-1"),
+        _proposal(12, "• Another point", "- Another point", "LIST-1"),
+        _proposal(14, "> [!Tip] Remember", "> [!tip] Remember", "CALL-1"),
+        # the sneaky one: formatting, plus one extra word
+        _proposal(15, "> Keep it simple.", "> Keep it **very** simple.", "EMPH-1"),
+        _proposal(2, "tags: [method]", "tags: [methods]", "FILE-3"),
+        _proposal(18, "**not touched**", "## not touched", "HEAD-4"),
+        _proposal(23, "[^1]: Another note.", "[^1]: Another note!", "NOTE-1"),
+        _proposal(21, "Monism is *one* idea.", "Monism is **one** idea.", "EMPH-1"),
+    ],
+    "notes": [{"line": 9, "rule": "FILE-2", "note": "Needs a blank line."}],
+}
+
+_fvault, _ = make_vault()
+_fchap = os.path.join(_fvault, "chapter-09.md")
+with open(_fchap, "w", encoding="utf-8") as fh:
+    fh.write(FMT_CHAPTER)
+
+_saved = (_llm.ask_json, _llm.have_key, _llm.load_key)
+_asked = []
+
+
+def _fake_ask(system, user, timeout=None):
+    _asked.append((system, user))
+    return json.loads(json.dumps(FMT_ANSWER)), None
+
+
+try:
+    _llm.ask_json, _llm.have_key = _fake_ask, (lambda: True)
+    fs = Session(_fchap)
+    fs.load_chapter(_fchap)
+    ff, fnotes = fs.run_analyses({"analyses": ["format"]})
+finally:
+    _llm.ask_json, _llm.have_key, _llm.load_key = _saved
+
+_by_line = {f["line_no"]: f for f in ff}
+check("formatting: the chapter goes to DeepSeek numbered, with the rules as the prompt",
+      _asked and _rules["text"] in _asked[0][0]
+      and "5\t#Chapter 9: Formatting" in _asked[0][1], _asked[:1])
+check("formatting: every safe proposal becomes a finding",
+      sorted(_by_line) == [5, 7, 9, 11, 12, 14, 21], sorted(_by_line))
+check("formatting: findings are their own kind, grouped by rule",
+      all(f["kind"] == "format" for f in ff)
+      and _by_line[11]["group"] == "format::LIST-1"
+      and _by_line[11]["occurrence_total"] == 2, [(f["line_no"], f["group"]) for f in ff])
+check("formatting: each finding shows the whole line, before and after",
+      _by_line[7]["match"] == "**Introduction**"
+      and _by_line[7]["becomes"] == "## Introduction")
+check("formatting: each finding quotes its rule from the rules file",
+      _by_line[7]["detail"] == _rules["rules"]["HEAD-4"]["text"]
+      and "version 1" in _by_line[7]["detail_label"], _by_line[7])
+check("formatting: the change that sneaks in a word is thrown away, and the author is told",
+      15 not in _by_line and any("line 15" in n and "change your wording" in n
+                                 for n in fnotes), fnotes)
+check("formatting: frontmatter and code are never changed",
+      2 not in _by_line and 18 not in _by_line
+      and sum("frontmatter and code are left alone" in n for n in fnotes) == 2, fnotes)
+check("formatting: a proposal quoting a line that isn't there is thrown away",
+      any("line 23" in n and "isn't what is in your chapter" in n for n in fnotes)
+      or 23 not in _by_line, fnotes)
+check("formatting: DeepSeek's advice is shown as notes, not changes",
+      any(n.startswith("Line 9 (FILE-2), not changed") for n in fnotes), fnotes)
+
+_ids = {f["line_no"]: f["id"] for f in ff}
+_before_disk = open(_fchap, encoding="utf-8").read()
+fp = fs.build_preview([_ids[5], _ids[7], _ids[11]], [])
+check("formatting: the preview changes exactly the approved lines",
+      [d["line_no"] for d in fp["diff"]] == [5, 7, 11], fp["diff"])
+check("formatting: a fix that wasn't approved isn't made",
+      "• Another point" in fp["new_text"] and "> [!Tip] Remember" in fp["new_text"])
+check("formatting: the preview counts the formatting fixes",
+      fp["counts"]["format"] == 3, fp["counts"])
+check("formatting: the preview writes nothing",
+      open(_fchap, encoding="utf-8").read() == _before_disk)
+
+fp_all = fs.build_preview([f["id"] for f in ff if f["group"] == "format::LIST-1"], [])
+check("formatting: yes to every fix under one rule makes all of them",
+      [d["line_no"] for d in fp_all["diff"]] == [11, 12], fp_all["diff"])
+
+fres = fs.commit([_ids[5], _ids[7], _ids[11]], [])
+_after_disk = open(_fchap, encoding="utf-8").read()
+check("formatting: saving writes the approved fixes and nothing else",
+      "## Introduction" in _after_disk and "- A bulleted point" in _after_disk
+      and "• Another point" in _after_disk
+      and len(_after_disk.split("\n")) == len(FMT_CHAPTER.split("\n")), fres)
+
+# A formatting fix and another change on the same line: the other wins, and the
+# fix is left out and reported, never merged into it.
+with open(_fchap, "w", encoding="utf-8") as fh:
+    fh.write(FMT_CHAPTER)
+try:
+    _llm.ask_json, _llm.have_key = _fake_ask, (lambda: True)
+    fs2 = Session(_fchap)
+    fs2.load_chapter(_fchap)
+    ff2, _ = fs2.run_analyses({"analyses": ["terms", "format"],
+                               "first_mention_only": True})
+finally:
+    _llm.ask_json, _llm.have_key, _llm.load_key = _saved
+_term21 = [f for f in ff2 if f["kind"] == "term" and f["line_no"] == 21]
+_fmt21 = [f for f in ff2 if f["kind"] == "format" and f["line_no"] == 21]
+fp2 = fs2.build_preview([f["id"] for f in _term21 + _fmt21], [])
+_line21 = fp2["new_text"].split("\n")[20]
+check("formatting: a fix on a line with another accepted change is left out and reported",
+      bool(_term21) and bool(_fmt21) and fp2["format_skipped"] == [21]
+      and "[[Monism]]" in _line21 and "*one*" in _line21
+      and fp2["counts"]["format"] == 0, (fp2["format_skipped"], _line21))
+
+# --- no key: the check explains itself and everything else works -------------
+
+with open(_fchap, "w", encoding="utf-8") as fh:
+    fh.write(FMT_CHAPTER)
+_net_calls = []
+_real_urlopen = _llm.urllib.request.urlopen
+
+
+def _no_network(*a, **k):
+    _net_calls.append(a)
+    raise AssertionError("the network was used")
+
+
+try:
+    _llm.load_key = lambda: None
+    _llm.urllib.request.urlopen = _no_network
+    fs3 = Session(_fchap)
+    fs3.load_chapter(_fchap)
+    ff3, fnotes3 = fs3.run_analyses({"analyses": ["terms", "format"],
+                                     "first_mention_only": True})
+finally:
+    _llm.ask_json, _llm.have_key, _llm.load_key = _saved
+    _llm.urllib.request.urlopen = _real_urlopen
+check("formatting: with no key, the check says it needs one",
+      any("needs a DeepSeek key" in n for n in fnotes3), fnotes3)
+check("formatting: with no key, nothing is sent anywhere", not _net_calls, _net_calls)
+check("formatting: with no key, the other checks still work",
+      any(f["kind"] == "term" for f in ff3)
+      and not any(f["kind"] == "format" for f in ff3), [f["kind"] for f in ff3])
+
+# --- the network fails: the check says so, and nothing else is affected --------
+
+
+def _run_with(urlopen):
+    try:
+        _llm.load_key = lambda: "sk-test"
+        _llm.urllib.request.urlopen = urlopen
+        s = Session(_fchap)
+        s.load_chapter(_fchap)
+        return s.run_analyses({"analyses": ["terms", "format"],
+                               "first_mention_only": True})
+    finally:
+        _llm.ask_json, _llm.have_key, _llm.load_key = _saved
+        _llm.urllib.request.urlopen = _real_urlopen
+
+
+def _offline(*a, **k):
+    raise _urlerr.URLError("no route to host")
+
+
+def _busy(req, *a, **k):
+    raise _urlerr.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+
+
+class _Reply:
+    def __init__(self, body):
+        self.body = body.encode("utf-8")
+
+    def read(self, *a):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+ff4, fnotes4 = _run_with(_offline)
+check("formatting: when DeepSeek can't be reached, the author is told",
+      any("couldn't be reached" in n for n in fnotes4), fnotes4)
+check("formatting: a network failure costs only the formatting check",
+      any(f["kind"] == "term" for f in ff4)
+      and not any(f["kind"] == "format" for f in ff4))
+_, fnotes5 = _run_with(_busy)
+check("formatting: a busy DeepSeek is reported as busy",
+      any("busy" in n for n in fnotes5), fnotes5)
+_, fnotes6 = _run_with(lambda *a, **k: _Reply("<html>not json</html>"))
+check("formatting: a garbled answer is reported, not trusted",
+      any("something unexpected" in n for n in fnotes6), fnotes6)
+_sent = []
+
+
+def _answers(req, *a, **k):
+    _sent.append(json.loads(req.data.decode("utf-8")))
+    return _Reply(json.dumps({"choices": [{"message": {"content": json.dumps(
+        {"changes": [_proposal(7, "**Introduction**", "## Introduction", "HEAD-4")],
+         "notes": []})}}]}))
+
+
+ff7, _ = _run_with(_answers)
+check("formatting: the real request carries the rules file as its system prompt",
+      _sent and _sent[0]["messages"][0]["content"] == formatting.build_prompt(_rules)
+      and _sent[0]["response_format"] == {"type": "json_object"}, _sent[:1])
+check("formatting: a good answer over the network becomes a finding",
+      [f["line_no"] for f in ff7 if f["kind"] == "format"] == [7])
+
+import app.server as _srv
+check("formatting: a drafts commit message names the formatting fixes",
+      "formatting" in _srv._tidy_message(
+          type("S", (), {"chapter_path": "chapters/chapter-09.md"})(),
+          {"counts": {"references": 0, "terms": 0, "glossary": 0, "expanded": 0,
+                      "format": 2}}))
+
+shutil.rmtree(_fvault, ignore_errors=True)
+shutil.rmtree(_rules_dir, ignore_errors=True)
+
 shutil.rmtree(root, ignore_errors=True)
 shutil.rmtree(_support, ignore_errors=True)
 

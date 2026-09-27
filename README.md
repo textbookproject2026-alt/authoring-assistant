@@ -24,7 +24,7 @@ onto your Dock so it is always to hand.
 ## What it does
 
 It reads one chapter at a time and asks you three kinds of question, one at a
-time.
+time, and a fourth if you have a DeepSeek key.
 
 **1. Citations.** It finds places where you have written something like
 `(Bhaskar, 1975)` or `Bhaskar (1975)`, checks that a matching entry exists in
@@ -41,6 +41,23 @@ with a phrase like "X is defined as", terms you put in **bold** the first time
 you use them, and capitalised terms you use more than once. Ones you approve are
 added to a single `glossary.md`, in alphabetical order.
 
+**4. AI formatting check** (optional, needs a DeepSeek key). It sends the chapter
+to DeepSeek with the platform's formatting rules and offers the fixes it
+proposes, one line at a time: a bolded line that should be a heading, a `•` that
+should be `- `, a callout type in capitals, a concept link whose page name is
+spelt wrong. **It never changes your wording.** Before a fix is offered, the tool
+compares the line's words with and without the change, markup aside; if a single
+word, number or punctuation mark differs, the fix is thrown away and you are told
+which line and why. It also refuses any fix that would change a web address, a
+footnote or a reference marker, add or remove a concept link, or point one at a
+page that doesn't exist. It
+never touches frontmatter or code, and never adds or removes lines: things like a
+missing blank line are listed as notes for you to fix by hand. The rules are in
+`app/formatting_rules.md`, the platform's formatting knowledge base, and the
+screen shows which version of them was used. Without a key the box is switched
+off and says why; the other three checks, and bringing in a Word document, work
+exactly as before.
+
 It also does one thing that is not a question: it can turn a **Word document**
 into a chapter in your vault. See "Bringing in a Word document" below.
 
@@ -56,7 +73,8 @@ into a chapter in your vault. See "Bringing in a Word document" below.
    change highlighted, and offers:
    - **Yes, make this change**
    - **No, leave it alone**
-   - **Yes to every mention** of that term or citation
+   - **Yes to every mention** of that term or citation (for a formatting fix:
+     **yes to every fix under that rule**)
    - **No to every mention** of it
 
    A counter at the top shows how far along you are, like "12 of 40".
@@ -474,7 +492,7 @@ to change.
 
 It holds two things. The first is optional: if you have a **DeepSeek** account,
 you can paste your key there and the tool will also ask DeepSeek for extra
-glossary suggestions. You do not need one — the ordinary checks work perfectly well on
+glossary suggestions, and offer the AI formatting check. You do not need one — the ordinary checks work perfectly well on
 their own, and if DeepSeek is ever unavailable the tool quietly carries on
 without it and tells you so.
 
@@ -484,7 +502,8 @@ precedence. It is not a password and not a secret.
 
 Your DeepSeek key and your sign-in are both stored in this Mac's Keychain, not in
 a file and never in your vault. The only thing ever sent to DeepSeek is the text
-of the chapter you are working on, and only when you tick the box.
+of the chapter you are working on (with the formatting rules, for the formatting
+check), and only when you tick one of its boxes.
 
 The first time the tool reads either of them after an update, macOS may ask
 whether **Authoring Assistant** is allowed to use your Keychain. Say yes — it is

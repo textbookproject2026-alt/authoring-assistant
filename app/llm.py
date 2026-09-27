@@ -253,6 +253,60 @@ def suggest_terms(chapter_text, max_chars=90000):
     return out, reason
 
 
+def ask_json(system, user, timeout=TIMEOUT):
+    """One DeepSeek request that must answer with a JSON object.
+
+    Returns (object, problem). object is None whenever anything went wrong, and
+    problem says what, as one of: "no-key", "busy", "key", "credit",
+    "http-<code>", "offline", "timeout", "failed", "unexpected". Each caller turns
+    that into its own sentence for the author. Like suggest_terms, this never
+    raises.
+    """
+    key = load_key()
+    if not key:
+        return None, "no-key"
+    payload = json.dumps({
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0,
+        "stream": False,
+        "response_format": {"type": "json_object"},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        API_URL, data=payload, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return None, "busy"
+        if e.code in (401, 403):
+            return None, "key"
+        if e.code == 402:
+            return None, "credit"
+        return None, f"http-{e.code}"
+    except urllib.error.URLError:
+        return None, "offline"
+    except (TimeoutError, OSError):
+        return None, "timeout"
+    except Exception:
+        return None, "failed"
+    try:
+        content = json.loads(body)["choices"][0]["message"]["content"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return None, "unexpected"
+    parsed = _extract_json(content)
+    if not isinstance(parsed, dict):
+        return None, "unexpected"
+    return parsed, None
+
+
 def save_key(key):
     """Store the key in this Mac's Keychain.
 

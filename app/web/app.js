@@ -214,6 +214,8 @@ function renderPreflight(info) {
   }
 
   ENV.deepseek = info.deepseek;
+  document.getElementById('format-version').textContent = info.format_rules_version
+    ? ` (version ${info.format_rules_version})` : '';
   refreshDeepseekOption();
 
   const blocked = info.blockers.length > 0;
@@ -225,12 +227,17 @@ document.getElementById('start-analysis').onclick = async () => {
   if (document.getElementById('opt-references').checked) analyses.push('references');
   if (document.getElementById('opt-terms').checked) analyses.push('terms');
   if (document.getElementById('opt-glossary').checked) analyses.push('glossary');
+  const formatBox = document.getElementById('opt-format');
+  if (formatBox && formatBox.checked && !formatBox.disabled) analyses.push('format');
   if (!analyses.length) return fail('Please tick at least one thing to look for.');
 
   show('step-working');
   const useDeepseek = document.getElementById('opt-deepseek').checked;
-  document.getElementById('working-note').textContent = useDeepseek
-    ? 'Reading the chapter, and asking DeepSeek for glossary ideas. This can take up to a minute.'
+  const asks = [];
+  if (useDeepseek) asks.push('for glossary ideas');
+  if (analyses.includes('format')) asks.push('to check its formatting');
+  document.getElementById('working-note').textContent = asks.length
+    ? `Reading the chapter, and asking DeepSeek ${asks.join(' and ')}. This can take up to a minute.`
     : 'This usually takes a moment.';
 
   try {
@@ -272,7 +279,9 @@ function renderFinding() {
   document.getElementById('finding-title').textContent = f.title;
   let explain = f.explain;
   if (f.occurrence_total > 1) {
-    explain += ` This is mention ${f.occurrence} of ${f.occurrence_total} in the chapter.`;
+    explain += f.kind === 'format'
+      ? ` This is fix ${f.occurrence} of ${f.occurrence_total} under this rule.`
+      : ` This is mention ${f.occurrence} of ${f.occurrence_total} in the chapter.`;
   }
   document.getElementById('finding-explain').textContent = explain;
 
@@ -306,6 +315,9 @@ function renderFinding() {
     ? `“${f.group_label}”`
     : (f.kind === 'term' ? `“${f.group_label}”` : `${f.group_label}`);
   document.querySelectorAll('.grp').forEach(s => s.textContent = label);
+  document.querySelectorAll('.grp-noun').forEach(s => {
+    s.textContent = f.kind === 'format' ? 'formatting fix under rule' : 'mention of';
+  });
 
   const many = f.occurrence_total > 1 || f.kind === 'term';
   document.querySelector('.answers.secondary').style.display = many ? '' : 'none';
@@ -380,6 +392,7 @@ function renderPreview(p, acceptedCount) {
   if (c.terms) bits.push(`${c.terms} mention${c.terms === 1 ? '' : 's'} linked to concept pages`);
   if (c.expanded) bits.push(`every mention of ${c.expanded} term${c.expanded === 1 ? '' : 's'} linked`);
   if (c.glossary) bits.push(`${c.glossary} glossary entr${c.glossary === 1 ? 'y' : 'ies'} added`);
+  if (c.format) bits.push(`${c.format} formatting fix${c.format === 1 ? '' : 'es'}`);
 
   const nothing = !p.diff.length && !p.glossary_added.length;
   document.getElementById('nothing-text').textContent = S.findings.length
@@ -444,8 +457,12 @@ function renderPreview(p, acceptedCount) {
   const notesBlock = document.getElementById('notes-block');
   const notesList = document.getElementById('notes-list');
   notesList.innerHTML = '';
-  S.notes.forEach(n => notesList.appendChild(el('li', '', n)));
-  notesBlock.classList.toggle('hidden', !S.notes.length);
+  const skipped = (p.format_skipped || []).map(n =>
+    `The formatting fix for line ${n} was left out, because you chose another ` +
+    'change on the same line. Run the formatting check again after saving.');
+  const allNotes = S.notes.concat(skipped);
+  allNotes.forEach(n => notesList.appendChild(el('li', '', n)));
+  notesBlock.classList.toggle('hidden', !allNotes.length);
 
   document.getElementById('confirm-box').checked = false;
   document.getElementById('do-commit').disabled = true;
@@ -1177,6 +1194,18 @@ function refreshDeepseekOption() {
     box.disabled = true; box.checked = false;
     state.textContent = 'No key is set up, so this is turned off. ' +
       'You can add one in Settings. The plain checks work perfectly well without it.';
+  }
+  const fbox = document.getElementById('opt-format');
+  const fstate = document.getElementById('format-state');
+  if (!fbox || !fstate) return;
+  if (ENV.deepseek) {
+    fbox.disabled = false;
+    fstate.textContent = 'Uses the DeepSeek key set up on this Mac.';
+  } else {
+    fbox.disabled = true; fbox.checked = false;
+    fstate.textContent = 'This needs a DeepSeek key, and none is set up on this ' +
+      'Mac, so it is turned off. You can add one in Settings. Everything else ' +
+      'works without it.';
   }
 }
 

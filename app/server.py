@@ -17,8 +17,8 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import (config, console, contents, convert, drafts, github, keychain,
-               llm, picker, preview, registry)
+from . import (config, console, contents, convert, drafts, formatting, github,
+               keychain, llm, picker, preview, registry)
 from .session import DraftsSession, Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -328,7 +328,15 @@ def r_prepare(handler, data):
         "concept_pages": [p["title"] for p in pages],
         "concept_source": source,
         "deepseek": llm.have_key(),
+        "format_rules_version": _format_rules_version(),
     }
+
+
+def _format_rules_version():
+    try:
+        return formatting.load_rules()["version"]
+    except OSError:
+        return None
 
 
 def r_analyse(handler, data):
@@ -461,6 +469,8 @@ def _tidy_message(session, preview):
         what.append("concept links")
     if counts["glossary"]:
         what.append("glossary")
+    if counts.get("format"):
+        what.append("formatting")
     return (f"Tidy {posixpath.basename(session.chapter_path)}: "
             f"{', '.join(what) or 'links'}\n\n"
             "Made with the Authoring Assistant.")

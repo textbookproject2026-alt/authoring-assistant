@@ -127,6 +127,12 @@
   <label class="check"><input type="checkbox" id="opt-glossary" checked>
     <span><strong>Glossary terms</strong> — find terms worth adding to your
     glossary.</span></label>
+  <label class="check" id="format-row"><input type="checkbox" id="opt-format">
+    <span><strong>AI formatting check</strong> — ask DeepSeek to check this
+    chapter against the book's formatting rules<span id="format-version"></span>,
+    and offer each fix for you to say yes or no to. Formatting only: a proposed
+    change that would alter your wording is thrown away, and you are told.
+    <em id="format-state"></em></span></label>
 
   <details>
     <summary>A few more choices</summary>
@@ -192,8 +198,8 @@
     <button class="no" id="ans-no">No, leave it alone</button>
   </div>
   <div class="answers secondary">
-    <button id="ans-yes-all">Yes to every mention of <span class="grp"></span></button>
-    <button id="ans-no-all">No to every mention of <span class="grp"></span></button>
+    <button id="ans-yes-all">Yes to every <span class="grp-noun">mention of</span> <span class="grp"></span></button>
+    <button id="ans-no-all">No to every <span class="grp-noun">mention of</span> <span class="grp"></span></button>
   </div>
   <div class="actions">
     <button class="link" id="ans-back">Go back one</button>
@@ -417,7 +423,8 @@
     <p>A chapter that has just come out of Word has no links in it at all. The
     tool can go through it now and offer to link its citations, its concept-page
     mentions, and pick out terms for your glossary — the same three questions as
-    always.</p>
+    always. With a DeepSeek key, it can also check the chapter's formatting against
+    the book's rules.</p>
     <p class="quiet">You can also leave it and do this another day. It is the
     same as choosing this chapter from the front screen.</p>
   </div>
