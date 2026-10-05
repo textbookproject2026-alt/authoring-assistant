@@ -1,0 +1,34 @@
+# The converter's and the questions' tests (README, "Tests") on every pull request
+# and on main. pandoc is the platform's pin (book-requests' PANDOC_VERSION), so the
+# real Word conversion runs here rather than being skipped.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PANDOC_VERSION: "3.11"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: pandoc ${{ env.PANDOC_VERSION }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$PANDOC_VERSION" --repo jgm/pandoc --pattern "pandoc-${PANDOC_VERSION}-1-amd64.deb" --dir "$RUNNER_TEMP"
+          sudo dpkg -i "$RUNNER_TEMP/pandoc-${PANDOC_VERSION}-1-amd64.deb" >/dev/null
+          pandoc --version | head -1
+      - run: python3 tests/test_all.py
