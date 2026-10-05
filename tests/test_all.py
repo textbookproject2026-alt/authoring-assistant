@@ -638,6 +638,26 @@ _by_hand = DocMap("# Chapter\n\nA paragraph that someone\nwrapped by hand over\n
 check("a genuinely wrapped paragraph is still spotted",
       hard_wrapped_paragraphs(_by_hand))
 
+# --- front matter on a re-import ---------------------------------------------
+
+_fm_dir = tempfile.mkdtemp()
+_fm_old = os.path.join(_fm_dir, "ch.md")
+check("no chapter there yet: the converted text is left as it is",
+      _convert.keep_front_matter(_fm_old, "# New\n") == "# New\n")
+with open(_fm_old, "w") as fh:
+    fh.write("---\ntitle: Old\n---\n\n# Old\n")
+check("the chapter it replaces lends its front matter",
+      _convert.keep_front_matter(_fm_old, "# New\n") == "---\ntitle: Old\n---\n\n# New\n")
+check("front matter in the converted text wins",
+      _convert.keep_front_matter(_fm_old, "---\ntitle: New\n---\n# New\n")
+      == "---\ntitle: New\n---\n# New\n")
+with open(_fm_old, "w") as fh:
+    fh.write("# Old\n\n---\n\nA rule, not front matter.\n")
+check("a horizontal rule further down is not front matter",
+      _convert.keep_front_matter(_fm_old, "# New\n") == "# New\n")
+shutil.rmtree(_fm_dir, ignore_errors=True)
+
+
 # --- the real thing, when this machine has pandoc ---------------------------
 
 import base64  # noqa: E402
@@ -696,6 +716,19 @@ if _pandoc:
           os.path.isfile(os.path.normpath(
               os.path.join(os.path.dirname(_chapter), _linked))),
           _linked)
+
+    # Re-importing over a chapter keeps its front matter; Word has none.
+    _front = '---\ntitle: "Chapter Nine"\ntopic: "ontology"\n---\n'
+    with open(_chapter) as fh:
+        _saved = fh.read()
+    with open(_chapter, "w") as fh:
+        fh.write(_front + "\n# Chapter Nine\n\nOld text.\n")
+    _again = _convert.convert(_docx, "Chapter 9.md", _wroot)
+    check("a re-import keeps the replaced chapter's front matter",
+          _again["text"].startswith(_front + "\n# Chapter Nine"), _again["text"][:120])
+    _convert.discard(_again)
+    with open(_chapter, "w") as fh:
+        fh.write(_saved)
 
     # The point of all of it: the new chapter is one the analyses can work on.
     _s2 = Session(_chapter)

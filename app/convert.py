@@ -553,6 +553,7 @@ def convert(docx_path, md_name, folder):
                                + str(e))
 
     text, media = _collect_media(stage, text, dest["link_prefix"])
+    text = keep_front_matter(os.path.join(folder, md_name), text)
 
     warnings = [w for w in (proc.stderr or "").strip().split("\n") if w.strip()]
     return {
@@ -565,6 +566,26 @@ def convert(docx_path, md_name, folder):
         "docx": os.path.abspath(docx_path),
         "md_name": md_name,
     }
+
+
+FRONT_MATTER = re.compile(r"\A---\r?\n.*?^---[ \t]*(\r?\n|\Z)", re.S | re.M)
+
+
+def keep_front_matter(old_path, text):
+    """A chapter that replaces one already at `old_path` keeps that chapter's
+    front matter (title, topic and so on). Word has none, so without this every
+    re-import would drop it. Front matter the new text brings itself wins."""
+    if FRONT_MATTER.match(text):
+        return text
+    try:
+        with open(old_path, encoding="utf-8", errors="replace", newline="") as fh:
+            old = FRONT_MATTER.match(fh.read())
+    except OSError:
+        return text
+    if not old:
+        return text
+    block = old.group(0) if old.group(1) else old.group(0) + "\n"
+    return block + "\n" + text.lstrip("\n")
 
 
 def _collect_media(stage, text, link_prefix):
