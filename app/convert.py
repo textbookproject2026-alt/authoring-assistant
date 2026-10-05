@@ -553,6 +553,7 @@ def convert(docx_path, md_name, folder):
                                + str(e))
 
     text, media = _collect_media(stage, text, dest["link_prefix"])
+    text = one_h1(text)
     text = keep_front_matter(os.path.join(folder, md_name), text)
 
     warnings = [w for w in (proc.stderr or "").strip().split("\n") if w.strip()]
@@ -566,6 +567,33 @@ def convert(docx_path, md_name, folder):
         "docx": os.path.abspath(docx_path),
         "md_name": md_name,
     }
+
+
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def one_h1(text):
+    """Keeps the first `# ` heading and makes every later one `## `.
+
+    A Word "Heading 1" after the chapter title (References, say) comes out as
+    a second H1, which the book's lint refuses (MD025) and which reads as a
+    second title. Headings inside fenced code are left alone. Runs on pandoc's
+    output, before keep_front_matter adds any front matter back.
+    """
+    out, seen, fence = [], False, None
+    for line in text.splitlines(keepends=True):
+        m = _FENCE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+        elif m:
+            fence = m.group(1)
+        elif line.startswith("# ") or line.rstrip("\r\n") == "#":
+            if seen:
+                line = "#" + line
+            seen = True
+        out.append(line)
+    return "".join(out)
 
 
 FRONT_MATTER = re.compile(r"\A---\r?\n.*?^---[ \t]*(\r?\n|\Z)", re.S | re.M)

@@ -667,6 +667,18 @@ check("front matter that was only the repeated title goes altogether",
       _convert.keep_front_matter(_fm_old, "# Old\n") == "# Old\n")
 shutil.rmtree(_fm_dir, ignore_errors=True)
 
+# --- one H1 per chapter ------------------------------------------------------
+
+check("a later H1 (a Word Heading 1 after the title) becomes an H2",
+      _convert.one_h1("# Chapter 1\n\nText.\n\n# References\n\nA.\n")
+      == "# Chapter 1\n\nText.\n\n## References\n\nA.\n")
+check("the first H1 and lower headings are left as they are",
+      _convert.one_h1("Intro.\n\n# Title\n\n## Part\n\n### Sub\n")
+      == "Intro.\n\n# Title\n\n## Part\n\n### Sub\n")
+check("a # line inside fenced code is not a heading",
+      _convert.one_h1("# Title\n\n```sh\n# a comment\n```\n\n# Next\n")
+      == "# Title\n\n```sh\n# a comment\n```\n\n## Next\n")
+
 
 # --- the real thing, when this machine has pandoc ---------------------------
 
