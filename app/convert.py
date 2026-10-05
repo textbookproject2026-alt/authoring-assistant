@@ -573,8 +573,11 @@ FRONT_MATTER = re.compile(r"\A---\r?\n.*?^---[ \t]*(\r?\n|\Z)", re.S | re.M)
 
 def keep_front_matter(old_path, text):
     """A chapter that replaces one already at `old_path` keeps that chapter's
-    front matter (title, topic and so on). Word has none, so without this every
-    re-import would drop it. Front matter the new text brings itself wins."""
+    front matter (topic and so on). Word has none, so without this every
+    re-import would drop it. Front matter the new text brings itself wins.
+    A `title:` that says what the new chapter's first `# ` heading says is left
+    out: the reading site takes the title from that heading, and both would
+    show it twice."""
     if FRONT_MATTER.match(text):
         return text
     try:
@@ -585,6 +588,17 @@ def keep_front_matter(old_path, text):
     if not old:
         return text
     block = old.group(0) if old.group(1) else old.group(0) + "\n"
+    h1 = re.search(r"(?m)^# +(.+?)\s*#*\s*$", text)
+    if h1:
+        plain = lambda t: " ".join(re.sub(r"[*_`]", "", t).split())
+        heading = plain(h1.group(1))
+        lines = block.splitlines(keepends=True)
+        kept = [ln for ln in lines[1:-1]
+                if not (re.match(r"title\s*:", ln)
+                        and plain(ln.split(":", 1)[1].strip().strip("\"'")) == heading)]
+        if not any(ln.strip() for ln in kept):
+            return text
+        block = lines[0] + "".join(kept) + lines[-1]
     return block + "\n" + text.lstrip("\n")
 
 
