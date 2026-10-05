@@ -655,6 +655,16 @@ with open(_fm_old, "w") as fh:
     fh.write("# Old\n\n---\n\nA rule, not front matter.\n")
 check("a horizontal rule further down is not front matter",
       _convert.keep_front_matter(_fm_old, "# New\n") == "# New\n")
+with open(_fm_old, "w") as fh:
+    fh.write('---\ntitle: "Chapter 1: *Old*"\ntopic: x\n---\n\n# Chapter 1: Old\n')
+check("a title: that repeats the new chapter's heading is left out",
+      _convert.keep_front_matter(_fm_old, "# Chapter 1: *Old*\n") == "---\ntopic: x\n---\n\n# Chapter 1: *Old*\n")
+check("a title: that differs from the heading is kept",
+      _convert.keep_front_matter(_fm_old, "# Chapter 1: New\n").startswith('---\ntitle: "Chapter 1: *Old*"\n'))
+with open(_fm_old, "w") as fh:
+    fh.write("---\ntitle: Old\n---\n\n# Old\n")
+check("front matter that was only the repeated title goes altogether",
+      _convert.keep_front_matter(_fm_old, "# Old\n") == "# Old\n")
 shutil.rmtree(_fm_dir, ignore_errors=True)
 
 
@@ -724,8 +734,8 @@ if _pandoc:
     with open(_chapter, "w") as fh:
         fh.write(_front + "\n# Chapter Nine\n\nOld text.\n")
     _again = _convert.convert(_docx, "Chapter 9.md", _wroot)
-    check("a re-import keeps the replaced chapter's front matter",
-          _again["text"].startswith(_front + "\n# Chapter Nine"), _again["text"][:120])
+    check("a re-import keeps the replaced chapter's front matter, less the repeated title",
+          _again["text"].startswith('---\ntopic: "ontology"\n---\n\n# Chapter Nine'), _again["text"][:120])
     _convert.discard(_again)
     with open(_chapter, "w") as fh:
         fh.write(_saved)
