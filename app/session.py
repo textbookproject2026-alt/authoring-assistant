@@ -15,7 +15,7 @@ import re
 import time
 
 from . import glossary as glossary_mod
-from . import formatting, llm, picker, references, terms
+from . import formatting, llm, references, terms
 from .edits import Edit, apply_edits, line_diff
 from .mdmap import DocMap, sha256
 
@@ -165,13 +165,6 @@ class Session:
                 "This chapter was saved by something else a few seconds ago. "
                 "If you were just editing it, make sure you have finished before "
                 "you continue."
-            )
-
-        if picker.obsidian_running():
-            warnings.append(
-                "Obsidian is open. Please save this chapter in Obsidian "
-                "(press Command and S together) and close its tab before you "
-                "continue, so your unsaved edits are not lost."
             )
 
         # Editors that leave a lock or recovery file behind.
