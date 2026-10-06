@@ -680,6 +680,33 @@ check("a # line inside fenced code is not a heading",
       == "# Title\n\n```sh\n# a comment\n```\n\n## Next\n")
 
 
+# --- headings made by hand (a line of bold or italic) -----------------------
+
+_eh_in = ("## 11.3 Methods\n\n***11.3.1 Case Study***\n\n*Limits*\n\nText with **bold**.\n\n"
+          "*Groups*:\n\n***11.3.2 Biography***\n\n**A bold sentence.**\n\n**a** and **b**\n\n"
+          "*[a link](https://x.org)*\n\n```\n**code**\n```\n\n**Lead-in**\ntext\n")
+_eh_out, _eh_made = _convert.emphasis_headings(_eh_in)
+check("an emphasis-only line becomes a heading one level below the one before it; "
+      "each kind of emphasis keeps its own level until the next real heading",
+      _eh_out == ("## 11.3 Methods\n\n### 11.3.1 Case Study\n\n#### Limits\n\nText with **bold**.\n\n"
+                  "#### Groups\n\n### 11.3.2 Biography\n\n**A bold sentence.**\n\n**a** and **b**\n\n"
+                  "*[a link](https://x.org)*\n\n```\n**code**\n```\n\n**Lead-in**\ntext\n"), _eh_out)
+check("each made heading is recorded, in order, with its level and what it was",
+      [(h["text"], h["level"], h["was"]) for h in _eh_made]
+      == [("11.3.1 Case Study", 3, "bold and italic"), ("Limits", 4, "italic"),
+          ("Groups", 4, "italic"), ("11.3.2 Biography", 3, "bold and italic")], _eh_made)
+check("under the title alone, a made heading is level 2",
+      _convert.emphasis_headings("# Title\n\n**Part one**\n\nText.\n")[0]
+      == "# Title\n\n## Part one\n\nText.\n")
+_eh_notes = _convert.report({"text": _eh_out, "media": [], "emphasis_headings": _eh_made})["notes"]
+_eh_note = [n for n in _eh_notes if "made into" in n["headline"]]
+check("what to check lists every made heading with its line",
+      len(_eh_note) == 1 and _eh_note[0]["headline"] == "4 lines were made into headings"
+      and "line 3: “11.3.1 Case Study” (was bold and italic, now level 3)" in _eh_note[0]["body"]
+      and "line 11: “11.3.2 Biography”" in _eh_note[0]["body"], _eh_note)
+check("nothing made, nothing listed",
+      not [n for n in _convert.report({"text": "# T\n", "media": []})["notes"] if "made into" in n["headline"]])
+
 # --- the real thing, when this machine has pandoc ---------------------------
 
 import base64  # noqa: E402
