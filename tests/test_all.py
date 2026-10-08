@@ -1982,6 +1982,22 @@ check("glossary: a term already linked in the chapter isn't offered again",
       not [f for f in _gf2 if f["group"] == "glossary-link::morphogenesis"], [f["group"] for f in _gf2])
 check("glossary: a term that is a concept page's title is left to the concept link",
       glossary.link_pages(["Emergence", "Morphogenesis"], "glossary", ["Emergence"])[0]["title"] == "Morphogenesis")
+_g3root, _g3chapter = make_vault()
+_gs3 = Session(_g3root)
+_gs3.load_chapter(_g3chapter)
+_gf3, _ = _gs3.run_analyses({"analyses": ["glossary"], "first_mention_only": True})
+_gn3 = [f for f in _gf3 if f["kind"] == "glossary" and f["line"] >= 0][:1]
+if _gn3:
+    _line = _gn3[0]["line"]
+    _fmt = {"kind": "format", "id": "fmt-x", "group": "format::X", "line": _line, "line_no": _line + 1,
+            "start": 0, "end": len(_gs3.docmap.lines[_line]), "replacement": "Reformatted line."}
+    _gs3.findings.append(_fmt)
+    _gp3 = _gs3.build_preview([_gn3[0]["id"], "fmt-x"], [])
+    check("glossary: a formatting fix on the same line wins over the new entry's link",
+          "Reformatted line." in _gp3["new_text"].split("\n") and _gp3["counts"]["format"] == 1, _gp3["format_skipped"])
+else:
+    check("glossary: a formatting fix on the same line wins over the new entry's link", False, "no new glossary term found")
+shutil.rmtree(_g3root, ignore_errors=True)
 shutil.rmtree(_groot, ignore_errors=True)
 
 shutil.rmtree(root, ignore_errors=True)
