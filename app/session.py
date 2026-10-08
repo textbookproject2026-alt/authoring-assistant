@@ -65,6 +65,24 @@ def find_vault_root(path):
     return d
 
 
+def chapter_title(text, path):
+    """A chapter's title as readers see it: front matter `title:`, else its first
+    "# " heading, else its file name without .md."""
+    m = re.match(r"---\r?\n(.*?)\r?\n---", text or "", re.S)
+    if m:
+        t = re.search(r"^title:\s*(.+?)\s*$", m.group(1), re.M)
+        if t:
+            return t.group(1).strip("\"'")
+    h = re.search(r"^#\s+(.+?)\s*#*\s*$", (text or "")[m.end() if m else 0:], re.M)
+    return h.group(1) if h else re.sub(r"\.md$", "", os.path.basename(path))
+
+
+def chapter_link(target, text, path):
+    """[[target|title]], the title made safe inside a wikilink."""
+    title = re.sub(r"\s+", " ", chapter_title(text, path)).replace("|", "-").replace("]]", "] ]")
+    return f"[[{target}|{title}]]"
+
+
 def hard_wrapped_paragraphs(docmap):
     """Find paragraphs split over several lines.
 
@@ -213,10 +231,13 @@ class Session:
         except OSError:
             return []
 
-    def glossary_target(self):
-        """What a link to the glossary names: its path in the book, no .md."""
-        rel = os.path.relpath(self.glossary_path, self.root).replace(os.sep, "/")
+    def page_target(self, path):
+        """What a link to a page names: its path in the book, no .md."""
+        rel = os.path.relpath(path, self.root).replace(os.sep, "/")
         return re.sub(r"\.md$", "", rel)
+
+    def glossary_target(self):
+        return self.page_target(self.glossary_path)
 
     def glossary_exists(self):
         return os.path.exists(self.glossary_path)
@@ -444,7 +465,10 @@ class Session:
             (f["term"], f["definition"])
             for f in accepted if f["kind"] == "glossary"
         ]
-        chapter_name = os.path.basename(self.chapter_path)
+        # Where the entry was first used: the chapter by its title, linked, never
+        # its file name ("First used in [[chapters/chapter-01|Chapter 1: …]].").
+        chapter_name = chapter_link(self.page_target(self.chapter_path), self.docmap.text,
+                                    self.chapter_path)
         g_before, g_after, g_added, _, _, _ = self.plan_glossary(
             gloss_terms, chapter_name)
 
@@ -632,12 +656,14 @@ class DraftsSession(Session):
     def glossary_headings(self):
         return glossary_mod.glossary_headings(self.glossary_text)
 
-    def glossary_target(self):
+    def page_target(self, path):
         # Pages are named from the top of the book's pages (its content folder).
-        path = self.glossary_path or self.GLOSSARY
         if path.startswith(self.CONTENT + "/"):
             path = path[len(self.CONTENT) + 1:]
         return re.sub(r"\.md$", "", path)
+
+    def glossary_target(self):
+        return self.page_target(self.glossary_path or self.GLOSSARY)
 
     def glossary_exists(self):
         return self.glossary_text is not None

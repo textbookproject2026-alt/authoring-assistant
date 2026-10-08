@@ -102,6 +102,54 @@ def _plausible_term(t, author_names):
     return True
 
 
+# Words that never start a term: a capitalised run led by one ("At Time") is a
+# fragment of a sentence, not a name for something.
+FUNCTION_WORDS = {
+    "at", "in", "on", "of", "for", "to", "by", "as", "with", "from", "into",
+    "after", "before", "during", "since", "until", "about", "between", "within",
+    "and", "or", "but", "nor", "so", "yet", "if", "when", "while", "where",
+    "because", "although", "though", "unless", "than", "then", "thus", "hence",
+    "is", "are", "was", "were", "be", "been", "has", "have", "had", "do", "does",
+}
+# Words that make a phrase a clause, not a term ("what you should do").
+CLAUSE_WORDS = {"you", "your", "we", "our", "us", "i", "my", "what", "which",
+                "should", "must", "can", "could", "would", "will", "shall", "may",
+                "might", "this", "that", "these", "those", "it", "its"}
+
+
+def non_term(term, line, start, kind):
+    """Why `term` (found at line[start:]) is obviously not a glossary term, or None.
+
+    Fragments split off a hyphenated compound ("Based Modeling" from
+    "Agent-Based Modeling"), runs led by a function word ("At Time"),
+    possessives ("Archer's"), bold labels (a colon, dash or slash in them:
+    "Yes: structural availability", "Time/space"), and run-in phrases (a comma,
+    or a clause word: "Practically, what you should do").
+    """
+    words = term.split()
+    if start > 0 and line[start - 1] in "-‐–" and line[start - 2:start - 1].isalpha():
+        return "a fragment of a hyphenated term"
+    if words and words[0].casefold() in FUNCTION_WORDS:
+        return f"starts with “{words[0]}”"
+    if re.search(r"[’']s$", term):
+        return "a possessive"
+    if re.search(r"[:/—–]|\s-\s", term):
+        return "a label, not a term"
+    if "," in term or any(w.strip(".,;").casefold() in CLAUSE_WORDS for w in words[1:]):
+        return "a phrase, not a term"
+    if kind == "bold" and len(words) > 4:
+        return "too long for a term"
+    # "Beach and Pedersen (2013)", "(Gerber and Green, 2012)": who wrote something.
+    if re.match(r"\s*(?:,\s*|\(\s*)(?:1[5-9]|20)\d\d\b", line[start + len(term):]):
+        return "a citation's authors"
+    return None
+
+
+def sentence_initial(line, start):
+    """True when line[start:] begins a sentence (start of the line, or after . ! ? :)."""
+    return not line[:start].strip() or bool(re.search(r"[.!?:]\s+$", line[:start]))
+
+
 def _sentence_for(docmap, lineno, start, end, limit=320):
     """The sentence that introduces the term, tidied into a usable definition.
 
@@ -207,18 +255,33 @@ def link_for(term, target, text):
 
 
 def analyse(docmap, existing_terms=(), concept_titles=(), author_names=(),
-            min_repeats=2):
-    """Deterministic glossary candidates. Returns (findings, notes)."""
+            min_repeats=2, removed=None):
+    """Deterministic glossary candidates. Returns (findings, notes).
+
+    Obvious non-terms are never offered (non_term). `removed`, a list, gets each
+    one as (term, why), once per term: what a dry run reports.
+    """
     existing = {t.casefold() for t in existing_terms}
     concepts = {t.casefold() for t in concept_titles}
     authors = {a.casefold() for a in author_names}
 
     candidates = {}   # key -> record
 
+    dropped = set()
+
+    def drop(term, why):
+        if removed is not None and term.casefold() not in dropped:
+            dropped.add(term.casefold())
+            removed.append((term, why))
+
     def add(term, kind, reason, lineno, start, end, weight):
+        raw = term
         term = _clean_term(term)
         if not _plausible_term(term, authors):
             return
+        why = non_term(term, docmap.lines[lineno], start + (len(raw) - len(raw.lstrip())), kind)
+        if why:
+            return drop(term, why)
         key = term.casefold()
         if key in existing or key in concepts:
             return
@@ -253,6 +316,14 @@ def analyse(docmap, existing_terms=(), concept_titles=(), author_names=(),
                 lineno, m.start("t"), m.end("t"), 2)
 
         for start, end, text in _capitalised_runs(line):
+            # A sentence's first word is capitalised whatever it is: a leading
+            # function word ("At", "For", "But", "The") there isn't part of the term.
+            first = text.split()[0]
+            if sentence_initial(line, start) and first.casefold() in (FUNCTION_WORDS | COMMON_LEADERS):
+                rest = text[len(first):].lstrip()
+                if len(rest.split()) < 2:
+                    continue
+                start, text = start + len(text) - len(rest), rest
             cleaned = _clean_term(text)
             # Once a leading article is dropped the phrase must still be more
             # than one word, or "The Actual" would be offered as "Actual".
