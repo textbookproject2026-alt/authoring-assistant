@@ -44,6 +44,8 @@ DEFINITIONAL = [
                 r"is\s+the\s+term\s+for\b"), "is the term for"),
 ]
 
+ABBREV_RE = re.compile(r"(?P<t>(?:[A-Za-z][\w’'-]*\s+){1,5}[A-Za-z][\w’'-]*)\s+\((?P<a>[A-Z]{2,6})\)")
+
 BOLD_RE = re.compile(r"\*\*(?P<t>[^*\n]{3,70})\*\*")
 
 CONNECTOR_WORDS = {"of", "the", "and", "in", "for", "to", "on", "as", "by"}
@@ -171,9 +173,11 @@ def _sentence_for(docmap, lineno, start, end, limit=320):
 def _capitalised_runs(line):
     """Runs of two to four capitalised words, allowing small joining words."""
     out = []
+    # A word may be a hyphenated compound, whole: "Agent-Based", "Multi-Sited".
+    word = r"[A-Z][a-zà-ÿ’']+(?:-[A-Za-zà-ÿ’']+)*"
     for m in re.finditer(
-        r"\b[A-Z][a-zà-ÿ’'-]+(?:\s+(?:of|the|and|in|for|to|on|as|by)\s+[A-Z][a-zà-ÿ’'-]+"
-        r"|\s+[A-Z][a-zà-ÿ’'-]+){1,3}\b",
+        rf"(?<![\w-]){word}(?:\s+(?:of|the|and|in|for|to|on|as|by)\s+{word}"
+        rf"|\s+{word}){{1,3}}\b",
         line,
     ):
         out.append((m.start(), m.end(), m.group(0)))
@@ -317,6 +321,20 @@ def analyse(docmap, existing_terms=(), concept_titles=(), author_names=(),
                 add(m.group("t"), "definition", f"introduced with “{label}”",
                     lineno, m.start("t"), m.end("t"), 3)
 
+        # A term introduced with its abbreviation: "Agent-based modeling (ABM)",
+        # the abbreviation being the phrase's initials (hyphenated parts count).
+        for m in ABBREV_RE.finditer(line):
+            words = m.group("t").split()
+            for n in range(min(len(words), 6), 1, -1):
+                phrase = words[-n:]
+                initials = "".join(p[0] for w in phrase for p in w.split("-") if p)
+                if initials.upper() == m.group("a"):
+                    t = " ".join(phrase)
+                    at = m.start("t") + len(m.group("t")) - len(t)
+                    add(t, "abbreviation", f"introduced with its abbreviation ({m.group('a')})",
+                        lineno, at, at + len(t), 3)
+                    break
+
         for m in BOLD_RE.finditer(line):
             raw = m.group("t").strip()
             # A bold run ending in a full stop is a run-in subheading, not a term.
@@ -354,7 +372,7 @@ def analyse(docmap, existing_terms=(), concept_titles=(), author_names=(),
             candidates[key]["count"] = max(candidates[key]["count"], len(places))
 
     findings = []
-    order = {"definition": 0, "bold": 1, "repeated": 2}
+    order = {"definition": 0, "abbreviation": 0, "bold": 1, "repeated": 2}
     for rec in sorted(candidates.values(),
                       key=lambda r: (order[r["kind"]], -r["count"],
                                      r["term"].casefold())):
