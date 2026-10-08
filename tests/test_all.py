@@ -1998,6 +1998,39 @@ if _gn3:
 else:
     check("glossary: a formatting fix on the same line wins over the new entry's link", False, "no new glossary term found")
 shutil.rmtree(_g3root, ignore_errors=True)
+check("glossary: an entry says where it was first used by the chapter's title, linked, never a file name",
+      "(First used in [[chapter-04|Test chapter]].)" in _gp["glossary_after"] and ".md" not in _gp["glossary_after"],
+      _gp["glossary_after"][-300:])
+from app.session import chapter_title
+check("glossary: a chapter's title is its front matter title, else its heading, else its name",
+      (chapter_title("---\ntitle: A\n---\n# B\n", "c.md"), chapter_title("# Chapter 1: B\n", "c.md"),
+       chapter_title("text\n", "x/chapter-02.md")) == ("A", "Chapter 1: B", "chapter-02"))
+
+_nt = [
+    ("At Time", "At Time is the moment", 0, "repeated"),
+    ("Based Modeling", "Agent-Based Modeling helps", 6, "repeated"),
+    ("Margaret Archer's", "Margaret Archer's view", 0, "repeated"),
+    ("Yes: structural availability", "**Yes: structural availability**", 2, "bold"),
+    ("Time/space", "**Time/space**", 2, "bold"),
+    ("Practically, what you should do", "**Practically, what you should do**", 2, "bold"),
+    ("Generative mechanism at deeper stratum", "**Generative mechanism at deeper stratum**", 2, "bold"),
+    ("Beach and Pedersen", "as Beach and Pedersen (2013) show", 3, "repeated"),
+    ("Gerber and Green", "(Gerber and Green, 2012)", 1, "repeated"),
+]
+check("glossary: obvious non-terms are never offered",
+      all(glossary.non_term(t, l, st, k) for t, l, st, k in _nt),
+      [t for t, l, st, k in _nt if not glossary.non_term(t, l, st, k)])
+_ok = [("Analytical Marxism", "Analytical Marxism holds", 0, "repeated"),
+       ("Critical Realism", "for Critical Realism the", 4, "repeated"),
+       ("open systems problem", "the **open systems problem**", 6, "bold"),
+       ("Being and Becoming", "of Being and Becoming in", 3, "repeated")]
+check("glossary: real terms pass the non-term filter",
+      not any(glossary.non_term(t, l, st, k) for t, l, st, k in _ok),
+      [(t, glossary.non_term(t, l, st, k)) for t, l, st, k in _ok])
+_rm = []
+glossary.analyse(DocMap("# T\n\nAt Time we wrote. At Time again.\n\n**Yes: structural availability** here.\n"), removed=_rm)
+check("glossary: a dry run reports what the filter removed, and why",
+      ("Yes: structural availability", "a label, not a term") in _rm, _rm)
 shutil.rmtree(_groot, ignore_errors=True)
 
 shutil.rmtree(root, ignore_errors=True)
