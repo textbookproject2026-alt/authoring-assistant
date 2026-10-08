@@ -393,10 +393,13 @@ class Session:
                 edits.append(self.anchor_edits[group])
 
         # A new glossary entry links the mention it was found at, when that is
-        # free text no other accepted change touches.
+        # free text no other accepted change touches. A line with an accepted
+        # formatting fix keeps the fix (it replaces the whole line); the next run
+        # offers the link, the term being in the glossary by then.
         target = self.glossary_target()
+        formatted = {f["line"] for f in accepted if f["kind"] == "format"}
         for f in accepted:
-            if f["kind"] != "glossary" or f["line"] < 0:
+            if f["kind"] != "glossary" or f["line"] < 0 or f["line"] in formatted:
                 continue
             spans = claimed.setdefault(f["line"], [])
             if any(f["start"] < e and s < f["end"] for s, e in spans) or \
