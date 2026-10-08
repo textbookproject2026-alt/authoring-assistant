@@ -229,6 +229,8 @@ def already_linked_titles(docmap, pages):
         forms = [t.strip() for t in page["titles"] if t.strip()]
         if not forms:
             continue
+        if page.get("link"):
+            forms = [page["link"]]
         pattern = "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True))
         rx = re.compile(rf"\[\[\s*(?:{pattern})\s*(?:\||#|\]\])", re.I)
         for lineno, line in enumerate(docmap.lines):
@@ -296,8 +298,10 @@ def analyse(docmap, pages, first_mention_only=True):
             skipped_later += 1
             continue
 
-        # Use the piped form only when the words on the page differ from the title.
-        replacement = f"[[{title}]]" if text == title else f"[[{title}|{text}]]"
+        # Use the piped form only when the words on the page differ from the
+        # target (a page may name its own: a glossary entry, glossary#Term).
+        target = page.get("link", title)
+        replacement = f"[[{target}]]" if text == target else f"[[{target}|{text}]]"
         before, match, after = sentence_around(docmap.lines[lineno], start, end)
         findings.append({
             "kind": "term",

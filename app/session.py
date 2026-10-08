@@ -206,6 +206,18 @@ class Session:
     def glossary_terms(self):
         return glossary_mod.existing_glossary_terms(self.glossary_path)
 
+    def glossary_headings(self):
+        try:
+            with open(self.glossary_path, "r", encoding="utf-8", errors="replace") as fh:
+                return glossary_mod.glossary_headings(fh.read())
+        except OSError:
+            return []
+
+    def glossary_target(self):
+        """What a link to the glossary names: its path in the book, no .md."""
+        rel = os.path.relpath(self.glossary_path, self.root).replace(os.sep, "/")
+        return re.sub(r"\.md$", "", rel)
+
     def glossary_exists(self):
         return os.path.exists(self.glossary_path)
 
@@ -299,6 +311,16 @@ class Session:
             if not f and not n:
                 notes.append("No glossary terms stood out in this chapter.")
             findings += f
+            # The terms the glossary already has, linked where this chapter first
+            # mentions them (a book-wide run reaches each chapter after the ones
+            # before it have added theirs).
+            f, n = glossary_mod.link_findings(
+                self.docmap,
+                glossary_mod.link_pages(self.glossary_headings(), self.glossary_target(),
+                                        [p["title"] for p in self.pages]),
+                first_only)
+            findings += f
+            notes += n
 
         if "format" in chosen:
             f, n = formatting.check(self.docmap, self.known_pages())
@@ -369,6 +391,21 @@ class Session:
         for group in used_groups:
             if group in self.anchor_edits:
                 edits.append(self.anchor_edits[group])
+
+        # A new glossary entry links the mention it was found at, when that is
+        # free text no other accepted change touches.
+        target = self.glossary_target()
+        for f in accepted:
+            if f["kind"] != "glossary" or f["line"] < 0:
+                continue
+            spans = claimed.setdefault(f["line"], [])
+            if any(f["start"] < e and s < f["end"] for s, e in spans) or \
+                    not self.docmap.is_free(f["line"], f["start"], f["end"]):
+                continue
+            spans.append((f["start"], f["end"]))
+            text = self.docmap.lines[f["line"]][f["start"]:f["end"]]
+            edits.append(Edit(f["line"], f["start"], f["end"],
+                              glossary_mod.link_for(f["term"], target, text), f["id"]))
 
         # Formatting fixes replace a whole line, so they go last and only onto
         # lines no other accepted change touches. One that would collide is
@@ -588,6 +625,16 @@ class DraftsSession(Session):
 
     def glossary_terms(self):
         return glossary_mod.glossary_terms_in(self.glossary_text)
+
+    def glossary_headings(self):
+        return glossary_mod.glossary_headings(self.glossary_text)
+
+    def glossary_target(self):
+        # Pages are named from the top of the book's pages (its content folder).
+        path = self.glossary_path or self.GLOSSARY
+        if path.startswith(self.CONTENT + "/"):
+            path = path[len(self.CONTENT) + 1:]
+        return re.sub(r"\.md$", "", path)
 
     def glossary_exists(self):
         return self.glossary_text is not None

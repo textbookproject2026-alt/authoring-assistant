@@ -1953,6 +1953,37 @@ check("formatting: a good answer over the network becomes a finding",
 shutil.rmtree(_fvault, ignore_errors=True)
 shutil.rmtree(_rules_dir, ignore_errors=True)
 
+# --- glossary links: the glossary's terms linked where a chapter first mentions them
+
+_groot, _gchapter = make_vault()
+with open(os.path.join(_groot, "glossary.md"), "w") as fh:
+    fh.write("# Glossary\n\n## Morphogenesis\n\nStructural elaboration.\n")
+_gs = Session(_groot)
+_gs.load_chapter(_gchapter)
+_gf, _ = _gs.run_analyses({"analyses": ["glossary"], "first_mention_only": True})
+_glinks = [f for f in _gf if f["group"].startswith("glossary-link::")]
+check("glossary: a term the glossary has is offered as a link to its entry",
+      [f["replacement"] for f in _glinks] == ["[[glossary#Morphogenesis|morphogenesis]]"],
+      [f["replacement"] for f in _glinks])
+_gnew = [f for f in _gf if f["kind"] == "glossary" and f["term"].casefold() == "analytical dualism"]
+check("glossary: a new term is still offered for the glossary", len(_gnew) == 1, [f.get("term") for f in _gf])
+_gp = _gs.build_preview([f["id"] for f in _glinks + _gnew], [])
+check("glossary: the accepted link is made",
+      "[[glossary#Morphogenesis|morphogenesis]]" in _gp["new_text"], _gp["new_text"][:600])
+check("glossary: a new entry links the mention it was found at",
+      "[[glossary#Analytical dualism|Analytical dualism]] is defined as" in _gp["new_text"], _gp["new_text"][:900])
+check("glossary: the new entry is in the glossary", "## Analytical dualism" in _gp["glossary_after"])
+with open(_gchapter, "w") as fh:
+    fh.write(_gp["new_text"])
+_gs2 = Session(_groot)
+_gs2.load_chapter(_gchapter)
+_gf2, _ = _gs2.run_analyses({"analyses": ["glossary"], "first_mention_only": True})
+check("glossary: a term already linked in the chapter isn't offered again",
+      not [f for f in _gf2 if f["group"] == "glossary-link::morphogenesis"], [f["group"] for f in _gf2])
+check("glossary: a term that is a concept page's title is left to the concept link",
+      glossary.link_pages(["Emergence", "Morphogenesis"], "glossary", ["Emergence"])[0]["title"] == "Morphogenesis")
+shutil.rmtree(_groot, ignore_errors=True)
+
 shutil.rmtree(root, ignore_errors=True)
 shutil.rmtree(_support, ignore_errors=True)
 

@@ -156,6 +156,56 @@ def glossary_terms_in(text):
     return terms
 
 
+def glossary_headings(text):
+    """The terms a glossary has as headings ("## Term"), as written: the entries a
+    link can point at (glossary#Term opens at the entry on the book's site)."""
+    out = []
+    in_fence = False
+    for line in (text or "").splitlines():
+        if re.match(r"^\s{0,3}(`{3,}|~{3,})", line):
+            in_fence = not in_fence
+            continue
+        m = None if in_fence else re.match(r"^\s{0,3}#{2,4}\s+(.+?)\s*#*\s*$", line)
+        if m:
+            out.append(_strip_markdown(m.group(1)))
+    return out
+
+
+def link_pages(headings, target, concept_titles=()):
+    """The glossary's entries as pages for terms.analyse, each linking to its
+    entry: [[<target>#Term|words]]. A term that is also a concept page's title
+    is left to the concept link."""
+    concepts = {t.casefold() for t in concept_titles}
+    return [{"title": h, "titles": [h], "link": f"{target}#{h}",
+             "rel": f"{target}.md", "path": f"{target}.md"}
+            for h in headings if h.casefold() not in concepts and len(h) >= 3]
+
+
+def link_findings(docmap, pages, first_mention_only=True):
+    """Mentions of glossary terms, each offered as a link to its entry
+    (terms.analyse, worded for the glossary). Returns (findings, notes)."""
+    from . import terms
+    if not pages:
+        return [], []
+    found, _ = terms.analyse(docmap, pages, first_mention_only)
+    for f in found:
+        term = f["group_label"]
+        f.update(
+            group=f"glossary-link::{term.casefold()}",
+            title=f"Mention of “{term}”",
+            explain=f"Link this to “{term}” in your glossary. On the book's site, "
+                    "pointing at the link shows the entry.",
+            detail_label="Glossary entry",
+            detail=term,
+        )
+    return found, []
+
+
+def link_for(term, target, text):
+    """The link a glossary mention becomes."""
+    return f"[[{target}#{term}|{text}]]"
+
+
 def analyse(docmap, existing_terms=(), concept_titles=(), author_names=(),
             min_repeats=2):
     """Deterministic glossary candidates. Returns (findings, notes)."""
