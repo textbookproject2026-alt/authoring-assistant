@@ -2033,6 +2033,12 @@ check("glossary: a dry run reports what the filter removed, and why",
 _pairs = glossary.analyse(DocMap("# T\n\n**Structure/Agency** is the first debate. **Time/space** comes later.\n"))[0]
 check("glossary: a slash pair is offered as two terms, each on its own",
       sorted(f["term"] for f in _pairs) == ["Agency", "Structure", "Time", "space"], [f["term"] for f in _pairs])
+_hy = glossary.analyse(DocMap("# T\n\nAgent-Based Modeling is one way. Agent-Based Modeling again, and Multi-Sited Ethnography. Multi-Sited Ethnography too.\n"))[0]
+check("glossary: a hyphenated compound stays whole",
+      sorted(f["term"] for f in _hy) == ["Agent-Based Modeling", "Multi-Sited Ethnography"], [f["term"] for f in _hy])
+_ab = glossary.analyse(DocMap("# T\n\nSome use agent-based modeling (ABM) for this, and others the social sciences (US).\n"))[0]
+check("glossary: a term introduced with its abbreviation is offered; initials must match",
+      [f["term"] for f in _ab] == ["agent-based modeling"], [f["term"] for f in _ab])
 shutil.rmtree(_groot, ignore_errors=True)
 
 shutil.rmtree(root, ignore_errors=True)
