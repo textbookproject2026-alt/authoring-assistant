@@ -2011,7 +2011,6 @@ _nt = [
     ("Based Modeling", "Agent-Based Modeling helps", 6, "repeated"),
     ("Margaret Archer's", "Margaret Archer's view", 0, "repeated"),
     ("Yes: structural availability", "**Yes: structural availability**", 2, "bold"),
-    ("Time/space", "**Time/space**", 2, "bold"),
     ("Practically, what you should do", "**Practically, what you should do**", 2, "bold"),
     ("Generative mechanism at deeper stratum", "**Generative mechanism at deeper stratum**", 2, "bold"),
     ("Beach and Pedersen", "as Beach and Pedersen (2013) show", 3, "repeated"),
@@ -2031,6 +2030,9 @@ _rm = []
 glossary.analyse(DocMap("# T\n\nAt Time we wrote. At Time again.\n\n**Yes: structural availability** here.\n"), removed=_rm)
 check("glossary: a dry run reports what the filter removed, and why",
       ("Yes: structural availability", "a label, not a term") in _rm, _rm)
+_pairs = glossary.analyse(DocMap("# T\n\n**Structure/Agency** is the first debate. **Time/space** comes later.\n"))[0]
+check("glossary: a slash pair is offered as two terms, each on its own",
+      sorted(f["term"] for f in _pairs) == ["Agency", "Structure", "Time", "space"], [f["term"] for f in _pairs])
 shutil.rmtree(_groot, ignore_errors=True)
 
 shutil.rmtree(root, ignore_errors=True)

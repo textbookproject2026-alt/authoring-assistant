@@ -133,7 +133,7 @@ def non_term(term, line, start, kind):
         return f"starts with “{words[0]}”"
     if re.search(r"[’']s$", term):
         return "a possessive"
-    if re.search(r"[:/—–]|\s-\s", term):
+    if re.search(r"[:—–]|\s-\s", term):
         return "a label, not a term"
     if "," in term or any(w.strip(".,;").casefold() in CLAUSE_WORDS for w in words[1:]):
         return "a phrase, not a term"
@@ -275,6 +275,16 @@ def analyse(docmap, existing_terms=(), concept_titles=(), author_names=(),
             removed.append((term, why))
 
     def add(term, kind, reason, lineno, start, end, weight):
+        # A dichotomy written as a pair ("Structure/Agency", "Time/space"): each
+        # side is a term of its own, offered separately.
+        pair = re.fullmatch(r"\s*([^/]+?)\s*/\s*([^/]+?)\s*", _strip_markdown(term))
+        if pair:
+            line = docmap.lines[lineno]
+            for side in pair.groups():
+                at = line.find(side, start)
+                at = start if at < 0 else at
+                add(side, kind, reason, lineno, at, at + len(side), weight)
+            return
         raw = term
         term = _clean_term(term)
         if not _plausible_term(term, authors):
