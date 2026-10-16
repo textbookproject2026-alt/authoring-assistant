@@ -1573,6 +1573,18 @@ check("no Contents heading: nothing is added, and the author is told",
 check("an empty Contents list gets the line under its heading",
       _contents.add_line("## Contents\n\n## Next\n", "chapters/X.md", "X")[0]
       == "## Contents\n\n- **[[chapters/X|X]]**\n\n## Next\n")
+_NUMBERED = ("# Book\n\n## Contents\n\n1. [[chapters/chapter-01|One]]\n"
+             "2. [[chapters/chapter-02|Two]]\n\nEach chapter has a button.\n")
+check("a numbered Contents gets the next number, after its last item, written as its items are",
+      _contents.add_line(_NUMBERED, "chapters/chapter-03.md", "Three")[0]
+      == _NUMBERED.replace("2. [[chapters/chapter-02|Two]]\n",
+                           "2. [[chapters/chapter-02|Two]]\n3. [[chapters/chapter-03|Three]]\n"))
+check("bold and \"1)\" kept as the list has them",
+      _contents.add_line("## Contents\n\n1) **[[a|A]]**\n", "chapters/b.md", "B")[0]
+      == "## Contents\n\n1) **[[a|A]]**\n2) **[[chapters/b|B]]**\n")
+check("a bullet list still gets a bullet",
+      _contents.add_line("## Contents\n\n+ [[a|A]]\n", "chapters/b.md", "B")[0]
+      == "## Contents\n\n+ [[a|A]]\n- **[[chapters/b|B]]**\n")
 check("a | in the title can't break the link",
       _contents.line_for("chapters/X.md", "A | B") == "- **[[chapters/X|A - B]]**")
 check("the title is the chapter's first heading, else its file name",
