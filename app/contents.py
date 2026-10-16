@@ -15,6 +15,7 @@ The same rules as every other edit here:
 
 The line's shape is the template's own (textbook-template/scripts/seed-index.md):
     - **[[chapters/Chapter 3|Chapter 3: Reality and the Problem]]**
+In a numbered Contents ("1. [[…]]"), the next number, as its items are written.
 book-requests' provisioning calls add_line() too, so a book set up from a
 request and a chapter added later read the same.
 """
@@ -23,7 +24,9 @@ import re
 
 HEADING = re.compile(r"^##\s+Contents\s*$", re.IGNORECASE)
 SECTION_END = re.compile(r"^(#{1,2}\s|---\s*$)")
-ITEM = re.compile(r"^[-*]\s")
+# A list item: a bullet, or a number ("1." or "1)") as some books' Contents are written.
+ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
+NUMBERED = re.compile(r"^(\d+)([.)])\s")
 
 
 def chapter_title(text, md_name):
@@ -74,13 +77,22 @@ def add_line(index_text, chapter_path, title):
 
     # After the last item and any lines indented under it (its description).
     last = None
+    last_item = None
     for i in range(start + 1, end):
         text = lines[i].rstrip("\r\n")
         if ITEM.match(text):
-            last = i
+            last = last_item = i
         elif last is not None and text.startswith((" ", "\t")) and text.strip():
             last = i
     new = line_for(chapter_path, chapter_title_safe(title)) + eol
+    # A numbered Contents gets the next number, written as its items are (bold or not):
+    # a bullet there would start a second list, out of the count (markdownlint MD029/MD032).
+    numbered = NUMBERED.match(lines[last_item]) if last_item is not None else None
+    if numbered:
+        body = new[2:]
+        if "**[[" not in lines[last_item]:
+            body = body.replace("**[[", "[[", 1).replace("]]**", "]]", 1)
+        new = f"{int(numbered.group(1)) + 1}{numbered.group(2)} {body}"
 
     if last is not None:
         if not lines[last].endswith(("\n", "\r")):
